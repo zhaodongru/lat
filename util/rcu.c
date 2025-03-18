@@ -401,8 +401,10 @@ static void rcu_init_lock(void)
         return;
     }
 
+#ifndef CONFIG_LATX_KZT
     qemu_mutex_lock(&rcu_sync_lock);
     qemu_mutex_lock(&rcu_registry_lock);
+#endif
 }
 
 static void rcu_init_unlock(void)
@@ -411,8 +413,10 @@ static void rcu_init_unlock(void)
         return;
     }
 
+#ifndef CONFIG_LATX_KZT
     qemu_mutex_unlock(&rcu_registry_lock);
     qemu_mutex_unlock(&rcu_sync_lock);
+#endif
 }
 
 static void rcu_init_child(void)

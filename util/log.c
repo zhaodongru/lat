@@ -57,6 +57,54 @@ int qemu_log(const char *fmt, ...)
     return ret;
 }
 
+static char log_tmp[512];
+static char* log_tmp_ptr = log_tmp;
+int qemu_log_tmp(const char *fmt, ...)
+{
+    int ret = 0;
+    QemuLogFile *logfile;
+
+    rcu_read_lock();
+    logfile = qatomic_rcu_read(&qemu_logfile);
+    if (logfile) {
+        va_list ap;
+        va_start(ap, fmt);
+        ret = vsprintf(log_tmp_ptr, fmt, ap);
+        va_end(ap);
+
+        /* Don't pass back error results.  */
+        if (ret < 0) {
+            ret = 0;
+        }
+        log_tmp_ptr += ret;
+        if((log_tmp_ptr-log_tmp) > 512) {
+            fprintf(stderr, "qemu_log_tmp exceed 512 bytes\n");
+            exit(0);
+        }
+    }
+    rcu_read_unlock();
+    return ret;
+}
+
+void qemu_log_reset(void)
+{
+    log_tmp_ptr = log_tmp;
+    memset(log_tmp, 0, 512);
+}
+
+/*
+ * syscall_error will display red info
+ */
+void qemu_log_commit(bool syscall_error)
+{
+    if(syscall_error) {
+        qemu_log("\n\033[1;31m==>\033[0m %s \033[1;31m<==\033[0m\n", log_tmp);
+    } else if (!(qemu_loglevel_mask(LOG_STRACE_ERROR))) {
+        qemu_log("%s\n", log_tmp);
+    }
+}
+
+
 static void __attribute__((__constructor__)) qemu_logfile_init(void)
 {
     qemu_mutex_init(&qemu_logfile_mutex);
@@ -103,7 +151,7 @@ void qemu_set_log(int log_flags)
     } else if (!qemu_logfile && need_to_open_file) {
         logfile = g_new0(QemuLogFile, 1);
         if (logfilename) {
-            logfile->fd = fopen(logfilename, log_append ? "a" : "w");
+            logfile->fd = fopen(logfilename, log_append ? "a+" : "w+");
             if (!logfile->fd) {
                 g_free(logfile);
                 perror(logfilename);
@@ -334,6 +382,16 @@ const QEMULogItem qemu_log_items[] = {
 #endif
     { LOG_STRACE, "strace",
       "log every user-mode syscall, its input, and its result" },
+    { LOG_STRACE_ERROR, "strace_error",
+      "log every user-mode syscall, its input, and its result" },
+    { LAT_LOG_MEM, "lat_mem", "latx 16k debug" },
+    { LAT_LOG_DT, "lat_dt", "latx-disassemble-trace debug" },
+    { LAT_LOG_SYSCALL, "lat_syscall", "lat syscall debug" },
+    { LAT_IR2_SCHED, "lat_ir2_sched", "latx ir2 reschedule" },
+    { LAT_LOG_PROFILE, "lat_profile", "latx profile info" },
+    { LAT_LOG_EFLAGS, "lat_eflags", "latx tail eflags info debug" },
+    { LAT_LOG_AOT, "lat_aot", "aot log info"},
+    { LAT_IMM_REG, "lat_imm_reg","latx imm reg info debug"},
     { 0, NULL, NULL },
 };
 

@@ -128,9 +128,6 @@ static void qbus_init(BusState *bus, DeviceState *parent, const char *name)
         bus->parent->num_child_bus++;
         object_property_add_child(OBJECT(bus->parent), bus->name, OBJECT(bus));
         object_unref(OBJECT(bus));
-    } else {
-        /* The only bus without a parent is the main system bus */
-        assert(bus == sysbus_get_default());
     }
 }
 

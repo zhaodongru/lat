@@ -157,6 +157,9 @@ DEF_HELPER_2(fdivr_STN_ST0, void, env, int)
 DEF_HELPER_1(fchs_ST0, void, env)
 DEF_HELPER_1(fabs_ST0, void, env)
 DEF_HELPER_1(fxam_ST0, void, env)
+#ifdef CONFIG_LATX
+DEF_HELPER_1(fxam_ST0_softfpu, void, env)
+#endif
 DEF_HELPER_1(fld1_ST0, void, env)
 DEF_HELPER_1(fldl2t_ST0, void, env)
 DEF_HELPER_1(fldl2e_ST0, void, env)
@@ -183,6 +186,7 @@ DEF_HELPER_1(fprem, void, env)
 DEF_HELPER_1(fyl2xp1, void, env)
 DEF_HELPER_1(fsqrt, void, env)
 DEF_HELPER_1(fsincos, void, env)
+DEF_HELPER_1(eflagtf, void, env)
 DEF_HELPER_1(frndint, void, env)
 DEF_HELPER_1(fscale, void, env)
 DEF_HELPER_1(fsin, void, env)
@@ -215,6 +219,8 @@ DEF_HELPER_3(movq, void, env, ptr, ptr)
 #define SHIFT 0
 #include "ops_sse_header.h"
 #define SHIFT 1
+#include "ops_sse_header.h"
+#define SHIFT 2
 #include "ops_sse_header.h"
 
 DEF_HELPER_3(rclb, tl, env, tl, tl)

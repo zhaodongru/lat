@@ -246,7 +246,11 @@ struct kvm_run;
 
 struct hax_vcpu_state;
 
+#ifdef CONFIG_LATX
+#define TB_JMP_CACHE_BITS 16
+#else
 #define TB_JMP_CACHE_BITS 12
+#endif
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
 /* work queue */
@@ -434,6 +438,7 @@ struct CPUState {
 
     /* track IOMMUs whose translations we've cached in the TCG TLB */
     GArray *iommu_notifiers;
+    int32_t previous_exception_index;
 };
 
 typedef QTAILQ_HEAD(CPUTailQ, CPUState) CPUTailQ;

@@ -18,10 +18,10 @@
  */
 #ifndef TRANSLATE_ALL_H
 #define TRANSLATE_ALL_H
-
 #include "exec/exec-all.h"
 
-
+extern void *l1_map[];
+extern IntervalTreeRoot pageflags_root;
 /* translate-all.c */
 struct page_collection *page_collection_lock(tb_page_addr_t start,
                                              tb_page_addr_t end);
@@ -29,11 +29,14 @@ void page_collection_unlock(struct page_collection *set);
 void tb_invalidate_phys_page_fast(struct page_collection *pages,
                                   tb_page_addr_t start, int len,
                                   uintptr_t retaddr);
-void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end);
+void tb_invalidate_phys_page(tb_page_addr_t addr);
 void tb_check_watchpoint(CPUState *cpu, uintptr_t retaddr);
 
+int get_insn_len_readable(target_ulong address);
+int latx_mprotect_one_page_rw(abi_ulong addr);
+int latx_mprotect_one_page_rw_resolv(abi_ulong addr);
 #ifdef CONFIG_USER_ONLY
+void page_protect(tb_page_addr_t page_addr);
 int page_unprotect(target_ulong address, uintptr_t pc);
 #endif
-
 #endif /* TRANSLATE_ALL_H */

@@ -33,7 +33,6 @@
 #include "sysemu/cpus.h"
 #include "sysemu/xen.h"
 #include "sysemu/whpx.h"
-#include "kvm/kvm_i386.h"
 #include "sev_i386.h"
 
 #include "qemu/error-report.h"
@@ -56,13 +55,11 @@
 #include "sysemu/tcg.h"
 #include "hw/qdev-properties.h"
 #include "hw/i386/topology.h"
-#ifndef CONFIG_USER_ONLY
-#include "exec/address-spaces.h"
-#include "hw/i386/apic_internal.h"
-#include "hw/boards.h"
-#endif
-
 #include "disas/capstone.h"
+
+#ifdef CONFIG_LATX
+extern int option_anonym;
+#endif
 
 /* Helpers for building CPUID[2] descriptors: */
 
@@ -628,6 +625,7 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           CPUID_MTRR, CPUID_MCA, CPUID_CLFLUSH (needed for Win64) */
           /* missing:
           CPUID_VME, CPUID_DTS, CPUID_SS, CPUID_HT, CPUID_TM, CPUID_PBE */
+
 #define TCG_EXT_FEATURES (CPUID_EXT_SSE3 | CPUID_EXT_PCLMULQDQ | \
           CPUID_EXT_MONITOR | CPUID_EXT_SSSE3 | CPUID_EXT_CX16 | \
           CPUID_EXT_SSE41 | CPUID_EXT_SSE42 | CPUID_EXT_POPCNT | \
@@ -656,6 +654,7 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
 #define TCG_EXT4_FEATURES 0
 #define TCG_SVM_FEATURES CPUID_SVM_NPT
 #define TCG_KVM_FEATURES 0
+
 #define TCG_7_0_EBX_FEATURES (CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_SMAP | \
           CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ADX | \
           CPUID_7_0_EBX_PCOMMIT | CPUID_7_0_EBX_CLFLUSHOPT |            \
@@ -665,9 +664,11 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           CPUID_7_0_EBX_HLE, CPUID_7_0_EBX_AVX2,
           CPUID_7_0_EBX_INVPCID, CPUID_7_0_EBX_RTM,
           CPUID_7_0_EBX_RDSEED */
+
 #define TCG_7_0_ECX_FEATURES (CPUID_7_0_ECX_PKU | \
           /* CPUID_7_0_ECX_OSPKE is dynamic */ \
           CPUID_7_0_ECX_LA57 | CPUID_7_0_ECX_PKS)
+
 #define TCG_7_0_EDX_FEATURES 0
 #define TCG_7_1_EAX_FEATURES 0
 #define TCG_APM_FEATURES 0
@@ -1498,7 +1499,7 @@ static const ExtSaveArea x86_ext_save_areas[] = {
             .size = sizeof(XSavePKRU) },
 };
 
-static uint32_t xsave_area_size(uint64_t mask)
+uint32_t xsave_area_size(uint64_t mask)
 {
     int i;
     uint64_t ret = 0;
@@ -1881,21 +1882,26 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .name = "qemu64",
         .level = 0xd,
         .vendor = CPUID_VENDOR_AMD,
-        .family = 6,
-        .model = 6,
-        .stepping = 3,
+        .family = 15,
+        .model = 107,
+        .stepping = 1,
         .features[FEAT_1_EDX] =
             PPRO_FEATURES |
             CPUID_MTRR | CPUID_CLFLUSH | CPUID_MCA |
             CPUID_PSE36,
         .features[FEAT_1_ECX] =
-            CPUID_EXT_SSE3 | CPUID_EXT_CX16,
+#ifdef CONFIG_LATX_SSSE3_SSE4
+            CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ |
+#endif
+            CPUID_EXT_SSE3,
         .features[FEAT_8000_0001_EDX] =
             CPUID_EXT2_LM | CPUID_EXT2_SYSCALL | CPUID_EXT2_NX,
         .features[FEAT_8000_0001_ECX] =
             CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM,
         .xlevel = 0x8000000A,
-        .model_id = "QEMU Virtual CPU version " QEMU_HW_VERSION,
+        .model_id = "LATX64 Virtual CPU @ 2.5GHz",
     },
     {
         .name = "phenom",
@@ -2022,9 +2028,16 @@ static X86CPUDefinition builtin_x86_defs[] = {
         .features[FEAT_1_EDX] =
             PPRO_FEATURES,
         .features[FEAT_1_ECX] =
+#ifdef CONFIG_LATX_SSSE3_SSE4
+            CPUID_EXT_AES | CPUID_EXT_POPCNT | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ |
+#endif
             CPUID_EXT_SSE3,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_LAHF_LM | CPUID_EXT3_SVM,
         .xlevel = 0x80000004,
-        .model_id = "QEMU Virtual CPU version " QEMU_HW_VERSION,
+        .model_id = "LATX32 Virtual CPU @ 2.5GHz",
     },
     {
         .name = "kvm32",
@@ -5276,21 +5289,16 @@ static void x86_cpu_load_model(X86CPU *cpu, X86CPUModel *model)
     /* legacy-cache defaults to 'off' if CPU model provides cache info */
     cpu->legacy_cache = !def->cache_info;
 
-    /* Special cases not set in the X86CPUDefinition structs: */
-    /* TODO: in-kernel irqchip for hvf */
-    if (kvm_enabled()) {
-        if (!kvm_irqchip_in_kernel()) {
-            x86_cpu_change_kvm_default("x2apic", "off");
-        } else if (kvm_irqchip_is_split() && kvm_enable_x2apic()) {
-            x86_cpu_change_kvm_default("kvm-msi-ext-dest-id", "on");
-        }
-
-        x86_cpu_apply_props(cpu, kvm_default_props);
-    } else if (tcg_enabled()) {
+    if (tcg_enabled()) {
         x86_cpu_apply_props(cpu, tcg_default_props);
     }
 
     env->features[FEAT_1_ECX] |= CPUID_EXT_HYPERVISOR;
+#ifdef CONFIG_LATX
+    if (option_anonym) {
+        env->features[FEAT_1_ECX] &= ~CPUID_EXT_HYPERVISOR;
+    }
+#endif
 
     /* sysenter isn't supported in compatibility mode on AMD,
      * syscall isn't supported in compatibility mode on Intel.
@@ -5910,7 +5918,7 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
          * set here, but we restrict to TCG none the less.
          */
         if (tcg_enabled() && cpu->expose_tcg) {
-            memcpy(signature, "TCGTCGTCGTCG", 12);
+            memcpy(signature, "LOONGARCH-BT", 12);
             *eax = 0x40000001;
             *ebx = signature[0];
             *ecx = signature[1];
@@ -6248,6 +6256,9 @@ static void x86_cpu_reset(DeviceState *dev)
     if (kvm_enabled()) {
         kvm_arch_reset_vcpu(cpu);
     }
+#endif
+#ifdef CONFIG_LATX
+    env->tb_jmp_cache_ptr = s->tb_jmp_cache;
 #endif
 }
 
@@ -6715,13 +6726,6 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
             host_cpuid(5, 0, &cpu->mwait.eax, &cpu->mwait.ebx,
                        &cpu->mwait.ecx, &cpu->mwait.edx);
             env->features[FEAT_1_ECX] |= CPUID_EXT_MONITOR;
-            if (kvm_enabled() && kvm_has_waitpkg()) {
-                env->features[FEAT_7_0_ECX] |= CPUID_7_0_ECX_WAITPKG;
-            }
-        }
-        if (kvm_enabled() && cpu->ucode_rev == 0) {
-            cpu->ucode_rev = kvm_arch_get_supported_msr_feature(kvm_state,
-                                                                MSR_IA32_UCODE_REV);
         }
     }
 
@@ -7223,6 +7227,7 @@ static bool x86_cpu_has_work(CPUState *cs)
     return x86_cpu_pending_interrupt(cs, cs->interrupt_request) != 0;
 }
 
+__attribute__((unused))
 static void x86_disas_set_info(CPUState *cs, disassemble_info *info)
 {
     X86CPU *cpu = X86_CPU(cs);
@@ -7442,7 +7447,11 @@ static void x86_cpu_common_class_init(ObjectClass *oc, void *data)
     cc->gdb_core_xml_file = "i386-32bit.xml";
     cc->gdb_num_core_regs = 50;
 #endif
+#ifdef CONFIG_DEBUG_TCG
     cc->disas_set_info = x86_disas_set_info;
+#else
+    cc->disas_set_info = NULL;
+#endif
 
     dc->user_creatable = true;
 

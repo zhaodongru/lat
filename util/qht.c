@@ -787,6 +787,21 @@ static inline void qht_bucket_iter(struct qht_bucket *head,
     } while (b);
 }
 
+void reset_all_locks(struct qht *ht)
+{
+    struct qht_map *map;
+
+    map = qatomic_rcu_read(&ht->map);
+	  size_t i;
+
+    for (i = 0; i < map->n_buckets; i++) {
+        struct qht_bucket *b = &map->buckets[i];
+        while (qemu_spin_locked(&b->lock)) {
+            qemu_spin_unlock(&b->lock);
+        }
+    }
+}
+
 /* call with all of the map's locks held */
 static inline void qht_map_iter__all_locked(struct qht_map *map,
                                             const struct qht_iter *iter,

@@ -40,6 +40,9 @@
 #include <libgen.h>
 #include "qemu/cutils.h"
 #include "qemu/compiler.h"
+#if defined(CONFIG_MIMALLOC)
+#include "mimalloc/mimalloc-override.h"
+#endif
 
 #ifdef CONFIG_LINUX
 #include <sys/syscall.h>
@@ -291,7 +294,7 @@ int qemu_try_set_nonblock(int fd)
 
 void qemu_set_nonblock(int fd)
 {
-    int f;
+    int f __attribute__((unused));
     f = qemu_try_set_nonblock(fd);
     assert(f == 0);
 }

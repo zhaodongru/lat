@@ -35,9 +35,14 @@
 #define W(n) ZMM_W(n)
 #define L(n) ZMM_L(n)
 #define Q(n) ZMM_Q(n)
+#if SHIFT == 1
 #define SUFFIX _xmm
+#else
+#define SUFFIX _ymm
+#endif
 #endif
 
+#if SHIFT <= 1
 void glue(helper_psrlw, SUFFIX)(CPUX86State *env, Reg *d, Reg *s)
 {
     int shift;
@@ -1588,6 +1593,7 @@ void glue(helper_palignr, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
     *d = r;
 }
 
+
 #define XMM0 (env->xmm_regs[0])
 
 #if SHIFT == 1
@@ -1777,20 +1783,7 @@ void glue(helper_roundps, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 
     prev_rounding_mode = env->sse_status.float_rounding_mode;
     if (!(mode & (1 << 2))) {
-        switch (mode & 3) {
-        case 0:
-            set_float_rounding_mode(float_round_nearest_even, &env->sse_status);
-            break;
-        case 1:
-            set_float_rounding_mode(float_round_down, &env->sse_status);
-            break;
-        case 2:
-            set_float_rounding_mode(float_round_up, &env->sse_status);
-            break;
-        case 3:
-            set_float_rounding_mode(float_round_to_zero, &env->sse_status);
-            break;
-        }
+        set_x86_rounding_mode(mode & 3, &env->sse_status);
     }
 
     d->ZMM_S(0) = float32_round_to_int(s->ZMM_S(0), &env->sse_status);
@@ -1814,20 +1807,7 @@ void glue(helper_roundpd, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 
     prev_rounding_mode = env->sse_status.float_rounding_mode;
     if (!(mode & (1 << 2))) {
-        switch (mode & 3) {
-        case 0:
-            set_float_rounding_mode(float_round_nearest_even, &env->sse_status);
-            break;
-        case 1:
-            set_float_rounding_mode(float_round_down, &env->sse_status);
-            break;
-        case 2:
-            set_float_rounding_mode(float_round_up, &env->sse_status);
-            break;
-        case 3:
-            set_float_rounding_mode(float_round_to_zero, &env->sse_status);
-            break;
-        }
+        set_x86_rounding_mode(mode & 3, &env->sse_status);
     }
 
     d->ZMM_D(0) = float64_round_to_int(s->ZMM_D(0), &env->sse_status);
@@ -1849,20 +1829,7 @@ void glue(helper_roundss, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 
     prev_rounding_mode = env->sse_status.float_rounding_mode;
     if (!(mode & (1 << 2))) {
-        switch (mode & 3) {
-        case 0:
-            set_float_rounding_mode(float_round_nearest_even, &env->sse_status);
-            break;
-        case 1:
-            set_float_rounding_mode(float_round_down, &env->sse_status);
-            break;
-        case 2:
-            set_float_rounding_mode(float_round_up, &env->sse_status);
-            break;
-        case 3:
-            set_float_rounding_mode(float_round_to_zero, &env->sse_status);
-            break;
-        }
+        set_x86_rounding_mode(mode & 3, &env->sse_status);
     }
 
     d->ZMM_S(0) = float32_round_to_int(s->ZMM_S(0), &env->sse_status);
@@ -1883,20 +1850,7 @@ void glue(helper_roundsd, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
 
     prev_rounding_mode = env->sse_status.float_rounding_mode;
     if (!(mode & (1 << 2))) {
-        switch (mode & 3) {
-        case 0:
-            set_float_rounding_mode(float_round_nearest_even, &env->sse_status);
-            break;
-        case 1:
-            set_float_rounding_mode(float_round_down, &env->sse_status);
-            break;
-        case 2:
-            set_float_rounding_mode(float_round_up, &env->sse_status);
-            break;
-        case 3:
-            set_float_rounding_mode(float_round_to_zero, &env->sse_status);
-            break;
-        }
+        set_x86_rounding_mode(mode & 3, &env->sse_status);
     }
 
     d->ZMM_D(0) = float64_round_to_int(s->ZMM_D(0), &env->sse_status);
@@ -1993,25 +1947,23 @@ SSE_HELPER_Q(helper_pcmpgtq, FCMPGTQ)
 
 static inline int pcmp_elen(CPUX86State *env, int reg, uint32_t ctrl)
 {
-    int val;
+    target_long val, limit;
 
     /* Presence of REX.W is indicated by a bit higher than 7 set */
     if (ctrl >> 8) {
-        val = abs1((int64_t)env->regs[reg]);
+        val = (target_long)env->regs[reg];
     } else {
-        val = abs1((int32_t)env->regs[reg]);
+        val = (int32_t)env->regs[reg];
     }
-
     if (ctrl & 1) {
-        if (val > 8) {
-            return 8;
-        }
+        limit = 8;
     } else {
-        if (val > 16) {
-            return 16;
-        }
+        limit = 16;
     }
-    return val;
+    if ((val > limit) || (val < -limit)) {
+        return limit;
+    }
+    return abs1(val);
 }
 
 static inline int pcmp_ilen(Reg *r, uint8_t ctrl)
@@ -2057,7 +2009,18 @@ static inline unsigned pcmpxstrx(CPUX86State *env, Reg *d, Reg *s,
     valids--;
     validd--;
 
-    CC_SRC = (valids < upper ? CC_Z : 0) | (validd < upper ? CC_S : 0);
+    if (valids < upper) {
+        env->eflags |= CC_Z;
+    } else {
+        env->eflags &= (~CC_Z);
+    }
+    if (validd < upper) {
+        env->eflags |= CC_S;
+    } else {
+        env->eflags &= (~CC_S);
+    }
+
+    /*CC_SRC = (valids < upper ? CC_Z : 0) | (validd < upper ? CC_S : 0);*/
 
     switch ((ctrl >> 2) & 3) {
     case 0:
@@ -2114,12 +2077,19 @@ static inline unsigned pcmpxstrx(CPUX86State *env, Reg *d, Reg *s,
     }
 
     if (res) {
-        CC_SRC |= CC_C;
+        env->eflags |= CC_C;
+        /*CC_SRC |= CC_C;*/
+    } else {
+        env->eflags &= (~CC_C);
     }
     if (res & 1) {
-        CC_SRC |= CC_O;
+        env->eflags |= CC_O;
+        /*CC_SRC |= CC_O;*/
+    } else {
+        env->eflags &= (~CC_O);
     }
-
+    env->eflags &= (~CC_A);
+    env->eflags &= (~CC_P);
     return res;
 }
 
@@ -2313,6 +2283,228 @@ void glue(helper_aeskeygenassist, SUFFIX)(CPUX86State *env, Reg *d, Reg *s,
     }
     d->L(1) = (d->L(0) << 24 | d->L(0) >> 8) ^ ctrl;
     d->L(3) = (d->L(2) << 24 | d->L(2) >> 8) ^ ctrl;
+}
+
+#endif
+#endif
+
+/* FMA3 op helpers */
+#if SHIFT == 1
+#define SSE_HELPER_FMAS(name, elem, F)                                         \
+    void name(CPUX86State *env, Reg *d, Reg *a, Reg *b, Reg *c, int flags)     \
+    {                                                                          \
+        d->elem(0) = F(a->elem(0), b->elem(0), c->elem(0), flags, &env->sse_status); \
+    }
+#define SSE_HELPER_FMAP(name, elem, num, F)                                    \
+    void glue(name, SUFFIX)(CPUX86State *env, Reg *d, Reg *a, Reg *b, Reg *c,  \
+                            int flags, int flip)                               \
+    {                                                                          \
+        int i;                                                                 \
+        for (i = 0; i < num; i++) {                                            \
+            d->elem(i) = F(a->elem(i), b->elem(i), c->elem(i), flags, &env->sse_status); \
+            flags ^= flip;                                                     \
+        }                                                                      \
+    }
+
+SSE_HELPER_FMAS(helper_fma4ss,  ZMM_S, float32_muladd)
+SSE_HELPER_FMAS(helper_fma4sd,  ZMM_D, float64_muladd)
+#endif
+
+#if SHIFT >= 1
+SSE_HELPER_FMAP(helper_fma4ps,  ZMM_S, 2 << SHIFT, float32_muladd)
+SSE_HELPER_FMAP(helper_fma4pd,  ZMM_D, 1 << SHIFT, float64_muladd)
+#endif
+
+#if SHIFT == 1
+#define SSE_HELPER_SHA1RNDS4(name, F, K) \
+    void name(CPUX86State *env, Reg *d, Reg *a, Reg *b)                     \
+    {                                                                       \
+        uint32_t A, B, C, D, E, t, i;                                       \
+                                                                            \
+        A = a->L(3);                                                        \
+        B = a->L(2);                                                        \
+        C = a->L(1);                                                        \
+        D = a->L(0);                                                        \
+        E = 0;                                                              \
+                                                                            \
+        for (i = 0; i <= 3; i++) {                                          \
+            t = F(B, C, D) + rol32(A, 5) + b->L(3 - i) + E + K;             \
+            E = D;                                                          \
+            D = C;                                                          \
+            C = rol32(B, 30);                                               \
+            B = A;                                                          \
+            A = t;                                                          \
+        }                                                                   \
+                                                                            \
+        d->L(3) = A;                                                        \
+        d->L(2) = B;                                                        \
+        d->L(1) = C;                                                        \
+        d->L(0) = D;                                                        \
+    }
+
+#define SHA1_F0(b, c, d) (((b) & (c)) ^ (~(b) & (d)))
+#define SHA1_F1(b, c, d) ((b) ^ (c) ^ (d))
+#define SHA1_F2(b, c, d) (((b) & (c)) ^ ((b) & (d)) ^ ((c) & (d)))
+
+SSE_HELPER_SHA1RNDS4(helper_sha1rnds4_f0, SHA1_F0, 0x5A827999)
+SSE_HELPER_SHA1RNDS4(helper_sha1rnds4_f1, SHA1_F1, 0x6ED9EBA1)
+SSE_HELPER_SHA1RNDS4(helper_sha1rnds4_f2, SHA1_F2, 0x8F1BBCDC)
+SSE_HELPER_SHA1RNDS4(helper_sha1rnds4_f3, SHA1_F1, 0xCA62C1D6)
+
+void helper_sha1nexte(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    d->L(3) = b->L(3) + rol32(a->L(3), 30);
+    d->L(2) = b->L(2);
+    d->L(1) = b->L(1);
+    d->L(0) = b->L(0);
+}
+
+void helper_sha1msg1(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    /* These could be overwritten by the first two assignments, save them.  */
+    uint32_t b3 = b->L(3);
+    uint32_t b2 = b->L(2);
+
+    d->L(3) = a->L(3) ^ a->L(1);
+    d->L(2) = a->L(2) ^ a->L(0);
+    d->L(1) = a->L(1) ^ b3;
+    d->L(0) = a->L(0) ^ b2;
+}
+
+void helper_sha1msg2(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    d->L(3) = rol32(a->L(3) ^ b->L(2), 1);
+    d->L(2) = rol32(a->L(2) ^ b->L(1), 1);
+    d->L(1) = rol32(a->L(1) ^ b->L(0), 1);
+    d->L(0) = rol32(a->L(0) ^ d->L(3), 1);
+}
+
+#define SHA256_CH(e, f, g)  (((e) & (f)) ^ (~(e) & (g)))
+#define SHA256_MAJ(a, b, c) (((a) & (b)) ^ ((a) & (c)) ^ ((b) & (c)))
+
+#define SHA256_RNDS0(w) (ror32((w), 2) ^ ror32((w), 13) ^ ror32((w), 22))
+#define SHA256_RNDS1(w) (ror32((w), 6) ^ ror32((w), 11) ^ ror32((w), 25))
+#define SHA256_MSGS0(w) (ror32((w), 7) ^ ror32((w), 18) ^ ((w) >> 3))
+#define SHA256_MSGS1(w) (ror32((w), 17) ^ ror32((w), 19) ^ ((w) >> 10))
+
+void helper_sha256rnds2(CPUX86State *env, Reg *d, Reg *a, Reg *b, uint32_t wk0, uint32_t wk1)
+{
+    uint32_t t, AA, EE;
+
+    uint32_t A = b->L(3);
+    uint32_t B = b->L(2);
+    uint32_t C = a->L(3);
+    uint32_t D = a->L(2);
+    uint32_t E = b->L(1);
+    uint32_t F = b->L(0);
+    uint32_t G = a->L(1);
+    uint32_t H = a->L(0);
+
+    /* Even round */
+    t = SHA256_CH(E, F, G) + SHA256_RNDS1(E) + wk0 + H;
+    AA = t + SHA256_MAJ(A, B, C) + SHA256_RNDS0(A);
+    EE = t + D;
+
+    /* These will be B and F at the end of the odd round */
+    d->L(2) = AA;
+    d->L(0) = EE;
+
+    D = C, C = B, B = A, A = AA;
+    H = G, G = F, F = E, E = EE;
+
+    /* Odd round */
+    t = SHA256_CH(E, F, G) + SHA256_RNDS1(E) + wk1 + H;
+    AA = t + SHA256_MAJ(A, B, C) + SHA256_RNDS0(A);
+    EE = t + D;
+
+    d->L(3) = AA;
+    d->L(1) = EE;
+}
+
+void helper_sha256rnds2_xmm0(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    uint32_t t, AA, EE;
+
+    uint32_t wk0 = XMM0.L(0);
+    uint32_t wk1 = XMM0.L(1);
+    uint32_t A = b->L(3);
+    uint32_t B = b->L(2);
+    uint32_t C = a->L(3);
+    uint32_t D = a->L(2);
+    uint32_t E = b->L(1);
+    uint32_t F = b->L(0);
+    uint32_t G = a->L(1);
+    uint32_t H = a->L(0);
+
+    /* Even round */
+    t = SHA256_CH(E, F, G) + SHA256_RNDS1(E) + wk0 + H;
+    AA = t + SHA256_MAJ(A, B, C) + SHA256_RNDS0(A);
+    EE = t + D;
+
+    /* These will be B and F at the end of the odd round */
+    d->L(2) = AA;
+    d->L(0) = EE;
+
+    D = C, C = B, B = A, A = AA;
+    H = G, G = F, F = E, E = EE;
+
+    /* Odd round */
+    t = SHA256_CH(E, F, G) + SHA256_RNDS1(E) + wk1 + H;
+    AA = t + SHA256_MAJ(A, B, C) + SHA256_RNDS0(A);
+    EE = t + D;
+
+    d->L(3) = AA;
+    d->L(1) = EE;
+}
+
+void helper_sha256msg1(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    /* b->L(0) could be overwritten by the first assignment, save it.  */
+    uint32_t b0 = b->L(0);
+
+    d->L(0) = a->L(0) + SHA256_MSGS0(a->L(1));
+    d->L(1) = a->L(1) + SHA256_MSGS0(a->L(2));
+    d->L(2) = a->L(2) + SHA256_MSGS0(a->L(3));
+    d->L(3) = a->L(3) + SHA256_MSGS0(b0);
+}
+
+void helper_sha256msg2(CPUX86State *env, Reg *d, Reg *a, Reg *b)
+{
+    /* Earlier assignments cannot overwrite any of the two operands.  */
+    d->L(0) = a->L(0) + SHA256_MSGS1(b->L(2));
+    d->L(1) = a->L(1) + SHA256_MSGS1(b->L(3));
+    /* Yes, this reuses the previously computed values.  */
+    d->L(2) = a->L(2) + SHA256_MSGS1(d->L(0));
+    d->L(3) = a->L(3) + SHA256_MSGS1(d->L(1));
+}
+#endif
+
+#if SHIFT >= 1
+void glue(helper_cvtph2ps, SUFFIX)(CPUX86State *env, Reg *d, Reg *s)
+{
+    int i;
+
+    for (i = 2 << SHIFT; --i >= 0; ) {
+         d->ZMM_S(i) = float16_to_float32(s->ZMM_H(i), true, &env->sse_status);
+    }
+}
+
+void glue(helper_cvtps2ph, SUFFIX)(CPUX86State *env, Reg *d, Reg *s, int mode)
+{
+    int i;
+    FloatRoundMode prev_rounding_mode = env->sse_status.float_rounding_mode;
+    if (!(mode & (1 << 2))) {
+        set_x86_rounding_mode(mode & 3, &env->sse_status);
+    }
+
+    for (i = 0; i < 2 << SHIFT; i++) {
+        d->ZMM_H(i) = float32_to_float16(s->ZMM_S(i), true, &env->sse_status);
+    }
+    for (i >>= 2; i < 1 << SHIFT; i++) {
+        d->Q(i) = 0;
+    }
+
+    env->sse_status.float_rounding_mode = prev_rounding_mode;
 }
 #endif
 

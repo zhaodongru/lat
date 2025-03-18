@@ -178,9 +178,9 @@ void trace_enable_events(const char *line_buf)
 {
     if (is_help_option(line_buf)) {
         trace_list_events(stdout);
-        if (monitor_cur() == NULL) {
-            exit(0);
-        }
+        //if (monitor_cur() == NULL) {
+        //    exit(0);
+        //}
     } else {
         do_trace_enable_events(line_buf);
     }

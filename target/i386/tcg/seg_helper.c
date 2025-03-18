@@ -1227,11 +1227,12 @@ static void do_interrupt_all(X86CPU *cpu, int intno, int is_int,
                      env->hflags & HF_CPL_MASK,
                      env->segs[R_CS].selector, env->eip,
                      (int)env->segs[R_CS].base + env->eip,
-                     env->segs[R_SS].selector, env->regs[R_ESP]);
+                     env->segs[R_SS].selector, (target_ulong)env->regs[R_ESP]);
             if (intno == 0x0e) {
                 qemu_log(" CR2=" TARGET_FMT_lx, env->cr[2]);
             } else {
-                qemu_log(" env->regs[R_EAX]=" TARGET_FMT_lx, env->regs[R_EAX]);
+                qemu_log(" env->regs[R_EAX]=" TARGET_FMT_lx,
+                    (target_ulong)env->regs[R_EAX]);
             }
             qemu_log("\n");
             log_cpu_state(CPU(cpu), CPU_DUMP_CCOP);

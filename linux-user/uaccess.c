@@ -23,6 +23,52 @@ void *lock_user(int type, abi_ulong guest_addr, ssize_t len, bool copy)
     return host_addr;
 }
 
+void *lock_user_remap(int type, abi_ulong guest_addr, ssize_t len, bool copy)
+{
+    void *host_addr;
+
+    guest_addr = cpu_untagged_addr(thread_cpu, guest_addr);
+    if (!access_ok_untagged(type, guest_addr, len)) {
+        return NULL;
+    }
+    host_addr = g2h_untagged(guest_addr);
+
+    if (TARGET_PAGE_SIZE < qemu_host_page_size) {
+        void *host_addr_temp = NULL;
+        if(posix_memalign(&host_addr_temp, qemu_host_page_size, len)) {
+            assert(0);
+        }
+        assert(host_addr_temp);
+
+        if (copy) {
+            memmove(host_addr_temp, host_addr, len);
+        }
+        host_addr = host_addr_temp;
+    }
+
+    return host_addr;
+}
+
+void unlock_user_remap(void *host_ptr, abi_ulong guest_addr, ssize_t len)
+{
+    void *host_ptr_conv;
+
+    if (!host_ptr) {
+        return;
+    }
+    host_ptr_conv = g2h(thread_cpu, guest_addr);
+    if (host_ptr == host_ptr_conv) {
+        return;
+    }
+    if (TARGET_PAGE_SIZE < qemu_host_page_size) {
+        if (len > 0) {
+            memcpy(host_ptr_conv, host_ptr, len);
+        }
+        free(host_ptr);
+    }
+}
+
+
 #ifdef DEBUG_REMAP
 void unlock_user(void *host_ptr, abi_ulong guest_addr, ssize_t len)
 {

@@ -65,6 +65,10 @@ void cpu_loop_exit(CPUState *cpu)
 {
     /* Undo the setting in cpu_tb_exec.  */
     cpu->can_do_io = 1;
+#ifdef CONFIG_LATX
+    CPUArchState *env = cpu->env_ptr;
+    env->fpu_clobber = true;
+#endif
     siglongjmp(cpu->jmp_env, 1);
 }
 

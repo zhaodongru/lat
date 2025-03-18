@@ -21,9 +21,15 @@
 #define SUFFIX _mmx
 #else
 #define Reg ZMMReg
+#if SHIFT == 1
 #define SUFFIX _xmm
+#else
+#define SUFFIX _ymm
+#endif
 #endif
 
+
+#if SHIFT <= 1
 #define dh_alias_Reg ptr
 #define dh_alias_ZMMReg ptr
 #define dh_alias_MMXReg ptr
@@ -345,6 +351,39 @@ DEF_HELPER_3(glue(aesimc, SUFFIX), void, env, Reg, Reg)
 DEF_HELPER_4(glue(aeskeygenassist, SUFFIX), void, env, Reg, Reg, i32)
 DEF_HELPER_4(glue(pclmulqdq, SUFFIX), void, env, Reg, Reg, i32)
 #endif
+
+#if SHIFT == 1
+DEF_HELPER_4(sha1rnds4_f0, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1rnds4_f1, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1rnds4_f2, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1rnds4_f3, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1nexte, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1msg1, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha1msg2, void, env, Reg, Reg, Reg)
+DEF_HELPER_6(sha256rnds2, void, env, Reg, Reg, Reg, i32, i32)
+DEF_HELPER_4(sha256rnds2_xmm0, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha256msg1, void, env, Reg, Reg, Reg)
+DEF_HELPER_4(sha256msg2, void, env, Reg, Reg, Reg)
+#endif
+#endif
+
+/* F16C helpers */
+#if SHIFT >= 1
+DEF_HELPER_3(glue(cvtph2ps, SUFFIX), void, env, Reg, Reg)
+DEF_HELPER_4(glue(cvtps2ph, SUFFIX), void, env, Reg, Reg, int)
+#endif
+
+/* FMA3 helpers */
+#if SHIFT == 1
+DEF_HELPER_6(fma4ss, void, env, Reg, Reg, Reg, Reg, int)
+DEF_HELPER_6(fma4sd, void, env, Reg, Reg, Reg, Reg, int)
+#endif
+
+#if SHIFT >= 1
+DEF_HELPER_7(glue(fma4ps, SUFFIX), void, env, Reg, Reg, Reg, Reg, int, int)
+DEF_HELPER_7(glue(fma4pd, SUFFIX), void, env, Reg, Reg, Reg, Reg, int, int)
+#endif
+
 
 #undef SHIFT
 #undef Reg

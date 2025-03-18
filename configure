@@ -233,17 +233,30 @@ then
   error_exit "main directory cannot contain spaces nor colons"
 fi
 
+# ccache check
+# Although meson can detect if ccache has been installed in your
+#   system. But if you set '--cross-file', and set 'c' or 'cpp',
+#   meson will not detect the ccache.
+# So we need to add 'ccache' here, instead of use meson to detect.
+# Also, meson will do double check, if 'ccache' not exsits, meson
+#   will delete 'ccache' and remain 'cc'. 
+ccache=""
+if [ -x "$(command -v ccache)" ]; then
+  ccache="ccache"
+fi
+
 # default parameters
 cpu=""
 iasl="iasl"
-interp_prefix="/usr/gnemul/qemu-%M"
+interp_prefix=""
 static="no"
 cross_compile="no"
 cross_prefix=""
 audio_drv_list=""
 block_drv_rw_whitelist=""
 block_drv_ro_whitelist=""
-host_cc="cc"
+host_cc="${ccache} cc"
+host_cpp="${ccache} c++"
 audio_win_int=""
 libs_qga=""
 debug_info="yes"
@@ -315,7 +328,6 @@ curl="auto"
 iconv="auto"
 curses="auto"
 docs="auto"
-fdt="auto"
 netmap="no"
 sdl="auto"
 sdl_image="auto"
@@ -373,20 +385,43 @@ prefix="/usr/local"
 qemu_suffix="qemu"
 slirp="auto"
 oss_lib=""
-bsd="no"
 linux="no"
 solaris="no"
 profiler="no"
+mimalloc="no"
+latx="no"
+latx_kzt="no"
+latx_new_world="no"
+latx_profiler="no"
+latx_perf="no"
+latx_superblock="no"
+latx_flag_pattern="no"
+latx_tunnel_lib="no"
+latx_flag_reduction="no"
+latx_jrra="no"
+latx_aot="no"
+latx_llsc="no"
+latx_opt_O0="no"
+latx_opt_O1="no"
+latx_opt_O2="no"
+latx_opt_O3="no"
+latx_opt_Ofast="no"
+guest_base_zero="no"
+latx_capstone_git="yes"
+latx_atomic="no"
+latx_xcomisx_opt="no"
+capstone_diet="yes"
+latx_syscall_tunnel="no"
+latx_tbmini_enable="yes"
 cocoa="auto"
-softmmu="yes"
 linux_user="no"
-bsd_user="no"
 blobs="true"
 pkgversion=""
 pie=""
 qom_cast_debug="yes"
 trace_backends="log"
 trace_file="trace"
+latx_lsfpu="yes"
 spice="$default_feature"
 rbd="auto"
 smartcard="$default_feature"
@@ -460,10 +495,10 @@ meson=""
 ninja=""
 skip_meson=no
 gettext="auto"
+tests="auto"
 fuse="auto"
 fuse_lseek="auto"
 multiprocess="auto"
-
 malloc_trim="auto"
 gio="$default_feature"
 
@@ -520,7 +555,7 @@ else
 fi
 
 if test -z "${CXX}${cross_prefix}"; then
-  cxx="c++"
+  cxx="$host_cpp"
 else
   cxx="${CXX-${cross_prefix}g++}"
 fi
@@ -680,6 +715,8 @@ elif check_define __arm__ ; then
   cpu="arm"
 elif check_define __aarch64__ ; then
   cpu="aarch64"
+elif check_define __loongarch__ ; then
+  cpu="loongarch"
 else
   cpu=$(uname -m)
 fi
@@ -688,7 +725,7 @@ ARCH=
 # Normalise host CPU name and set ARCH.
 # Note that this case should only have supported host CPUs, not guests.
 case "$cpu" in
-  ppc|ppc64|s390x|sparc64|x32|riscv32|riscv64)
+  ppc|ppc64|s390x|sparc64|x32|riscv32|riscv64|loongarch)
   ;;
   ppc64le)
     ARCH="ppc64"
@@ -734,47 +771,6 @@ MINGW32*)
   supported_os="yes"
   pie="no"
 ;;
-GNU/kFreeBSD)
-  bsd="yes"
-  audio_drv_list="oss try-sdl"
-  audio_possible_drivers="oss sdl pa"
-;;
-FreeBSD)
-  bsd="yes"
-  make="${MAKE-gmake}"
-  audio_drv_list="oss try-sdl"
-  audio_possible_drivers="oss sdl pa"
-  # needed for kinfo_getvmmap(3) in libutil.h
-  netmap=""  # enable netmap autodetect
-;;
-DragonFly)
-  bsd="yes"
-  make="${MAKE-gmake}"
-  audio_drv_list="oss try-sdl"
-  audio_possible_drivers="oss sdl pa"
-;;
-NetBSD)
-  bsd="yes"
-  make="${MAKE-gmake}"
-  audio_drv_list="oss try-sdl"
-  audio_possible_drivers="oss sdl"
-  oss_lib="-lossaudio"
-;;
-OpenBSD)
-  bsd="yes"
-  make="${MAKE-gmake}"
-  audio_drv_list="try-sdl"
-  audio_possible_drivers="sdl"
-;;
-Darwin)
-  bsd="yes"
-  darwin="yes"
-  audio_drv_list="try-coreaudio try-sdl"
-  audio_possible_drivers="coreaudio sdl"
-  # Disable attempts to use ObjectiveC features in os/object.h since they
-  # won't work when we're compiling with gcc as a C compiler.
-  QEMU_CFLAGS="-DOS_OBJECT_USE_OBJC=0 $QEMU_CFLAGS"
-;;
 SunOS)
   solaris="yes"
   make="${MAKE-gmake}"
@@ -800,12 +796,6 @@ Linux)
   vhost_user=${default_feature:-yes}
 ;;
 esac
-
-if [ "$bsd" = "yes" ] ; then
-  if [ "$darwin" != "yes" ] ; then
-    bsd_user="yes"
-  fi
-fi
 
 : ${make=${MAKE-make}}
 
@@ -1040,6 +1030,7 @@ for opt do
       debug="yes"
       strip_opt="no"
       fortify_source="no"
+      capstone_diet="no"
   ;;
   --enable-sanitizers) sanitizers="yes"
   ;;
@@ -1141,26 +1132,80 @@ for opt do
   ;;
   --enable-profiler) profiler="yes"
   ;;
+  --enable-kzt) latx_kzt="yes"
+  ;;
+  --enable-latx) latx="yes"
+                 capstone="disabled"
+  ;;
+  --enable-new-world) latx_new_world="yes"
+  ;;
+  --enable-latx-profiler) latx_profiler="yes"
+  ;;
+  --enable-latx-perf) latx_perf="yes"
+  ;;
+  --enable-latx-superblock) latx_superblock="yes"
+  ;;
+  --enable-latx-insts-pattern) latx_insts_pattern="yes"
+  ;;
+  --enable-latx-flag-reduction) latx_flag_reduction="yes"
+  ;;
+  --disable-latx-lsfpu) latx_lsfpu="no"
+  ;;
+  --enable-latx-tunnel-lib) latx_tunnel_lib="yes"
+  ;;
+  --enable-latx-runtime-trace-range) latx_runtime_trace_range="yes"
+  ;;
+  --enable-latx-jrra) latx_jrra="yes"
+  ;;
+  --enable-latx-aot) latx_aot="yes"
+  ;;
+  --enable-mimalloc) mimalloc="yes"
+  ;;
+  --enable-latx-llsc) latx_llsc="yes"
+  ;;
+  --optimize-O0) latx_opt_O0="yes"
+  ;;
+  --optimize-O1) latx_opt_O1="yes"
+  ;;
+  --optimize-O2) latx_opt_O2="yes"
+  ;;
+  --optimize-O3) latx_opt_O3="yes"
+  ;;
+  --optimize-Ofast) latx_opt_Ofast="yes"
+  ;;
+  --enable-latx-16k-debug) latx_16k_debug="yes"
+  ;;
+  --enable-ptrace-debug) ptrace_debug="yes"
+  ;;
+  --enable-guest-base-zero) guest_base_zero="yes"
+  ;;
+  --enable-latx-capstone-git) latx_capstone_git="yes"
+  ;;
+  --disable-latx-capstone-git) latx_capstone_git="no"
+  ;;
+  --enable-latx-atomic) latx_atomic="yes"
+  ;;
+  --enable-latx-xcomisx-opt) latx_xcomisx_opt="yes"
+  ;;
+  --disable-capstone-diet) capstone_diet="no"
+  ;;
+  --enable-latx-syscall-tunnel) latx_syscall_tunnel="yes"
+  ;;
+  --enable-latx-tbmini) latx_tbmini_enable="yes"
+  ;;
+  --disable-latx-tbmini) latx_tbmini_enable="no"
+  ;;
   --disable-cocoa) cocoa="disabled"
   ;;
   --enable-cocoa) cocoa="enabled"
   ;;
-  --disable-system) softmmu="no"
-  ;;
-  --enable-system) softmmu="yes"
-  ;;
   --disable-user)
       linux_user="no" ;
-      bsd_user="no" ;
   ;;
   --enable-user) ;;
   --disable-linux-user) linux_user="no"
   ;;
   --enable-linux-user) linux_user="yes"
-  ;;
-  --disable-bsd-user) bsd_user="no"
-  ;;
-  --enable-bsd-user) bsd_user="yes"
   ;;
   --enable-pie) pie="yes"
   ;;
@@ -1203,10 +1248,6 @@ for opt do
   --disable-curl) curl="disabled"
   ;;
   --enable-curl) curl="enabled"
-  ;;
-  --disable-fdt) fdt="disabled"
-  ;;
-  --enable-fdt) fdt="enabled"
   ;;
   --enable-fdt=git) fdt="internal"
   ;;
@@ -1442,6 +1483,10 @@ for opt do
   ;;
   --enable-replication) replication="yes"
   ;;
+  --disable-tests) tests="disabled"
+  ;;
+  --enable-tests) tests="enabled"
+  ;;
   --disable-bochs) bochs="no"
   ;;
   --enable-bochs) bochs="yes"
@@ -1605,6 +1650,69 @@ local_statedir="${local_statedir:-$prefix/var}"
 firmwarepath="${firmwarepath:-$datadir/qemu-firmware}"
 localedir="${localedir:-$datadir/locale}"
 
+# use latx.lds
+if test "$latx" = "yes" ; then
+  echo "build for target $target_list"
+  case "$cpu" in
+    mips)
+      echo "error!"
+    ;;
+    loongarch)
+      if test "$latx_new_world" = "yes" ; then
+        interp_prefix="/usr/gnemul/lat-%M"
+        if test "$target_list" = "x86_64-linux-user" ; then
+          latx_ldflags="-T$source_path/latx-x86_64-new.lds"
+        else
+          latx_ldflags="-T$source_path/latx-new.lds"
+          latx_kzt="no"
+        fi
+      else
+        interp_prefix="/usr/gnemul/latx-%M"
+        if test "$target_list" = "x86_64-linux-user" ; then
+          latx_ldflags="-T$source_path/latx-x86_64.lds"
+        else
+          latx_ldflags="-T$source_path/latx.lds"
+          latx_kzt="no"
+        fi
+      fi
+    ;;
+    *)
+      # This will result in either an error or falling back to TCI later
+      latx_ldflags=""
+    ;;
+  esac
+
+  case "$QEMU_LDFLAGS" in
+    *"-T"*)
+    ;;
+    *)
+    QEMU_LDFLAGS="$latx_ldflags $QEMU_LDFLAGS"
+    ;;
+  esac
+  if test "$debug" = "yes" ; then
+    # add `--export-dynamic`, used for backtrace
+    QEMU_LDFLAGS="-export-dynamic $QEMU_LDFLAGS"
+  else
+    QEMU_LDFLAGS="-export-dynamic $QEMU_LDFLAGS"
+  fi
+  QEMU_LDFLAGS="-lcrypto $QEMU_LDFLAGS"
+else
+  echo "build for target $target_list"
+  if test "$target_list" = "x86_64-linux-user" ; then
+    case "$cpu" in
+      mips)
+        QEMU_LDFLAGS="$QEMU_LDFLAGS -T$source_path/mips.lds"
+      ;;
+      loongarch)
+        QEMU_LDFLAGS="$QEMU_LDFLAGS -T$source_path/latx.lds"
+      ;;
+    esac
+  fi
+fi
+if test "$mimalloc" = "yes" ; then
+  QEMU_LDFLAGS="$QEMU_LDFLAGS -Wl,--allow-multiple-definition ../target/i386/latx/exlib/libmimalloc.a"
+fi
+
 case "$cpu" in
     ppc)
            CPU_CFLAGS="-m32"
@@ -1655,23 +1763,16 @@ QEMU_CFLAGS="$CPU_CFLAGS $QEMU_CFLAGS"
 # For user-mode emulation the host arch has to be one we explicitly
 # support, even if we're using TCI.
 if [ "$ARCH" = "unknown" ]; then
-  bsd_user="no"
   linux_user="no"
 fi
 
 default_target_list=""
-deprecated_targets_list=ppc64abi32-linux-user,lm32-softmmu,unicore32-softmmu
+deprecated_targets_list=ppc64abi32-linux-user
 deprecated_features=""
 mak_wilds=""
 
-if [ "$softmmu" = "yes" ]; then
-    mak_wilds="${mak_wilds} $source_path/default-configs/targets/*-softmmu.mak"
-fi
 if [ "$linux_user" = "yes" ]; then
     mak_wilds="${mak_wilds} $source_path/default-configs/targets/*-linux-user.mak"
-fi
-if [ "$bsd_user" = "yes" ]; then
-    mak_wilds="${mak_wilds} $source_path/default-configs/targets/*-bsd-user.mak"
 fi
 
 # If the user doesn't explicitly specify a deprecated target we will
@@ -1786,12 +1887,45 @@ Advanced options (experts only):
   --tls-priority           default TLS protocol/cipher priority string
   --enable-gprof           QEMU profiling with gprof
   --enable-profiler        profiler support
+  --enable-latx            loongarch fast x86-transaction support
+  --disable-guest-base     set guest base to zero
+  --enable-ptrace-debug    enable ptrace debug
   --enable-debug-stack-usage
                            track the maximum stack usage of stacks created by qemu_alloc_stack
   --enable-plugins
                            enable plugins via shared library loading
   --disable-containers     don't use containers for cross-building
   --gdb=GDB-path           gdb to use for gdbstub tests [$gdb_bin]
+
+Optional only for LATX:
+  --enable-new-world
+  ======= Debug Optional =======
+  --enable-latx-16k-debug enable 16k page debug
+  ====== Capstone Optional ======
+  --enable-latx-capstone-git
+                          enable capstone git branch
+  --enable-capstone-diet
+  ====== Optimize Optional ======
+  --enable-latx-flag-reduction
+                          enable flag reduction optimization
+  --enable-latx-tunnel-lib
+                          enable lib tunnel optimization
+  --enable-latx-jrra      enable jr-ra optimization
+  --enable-latx-llsc      enable ll-sc-AMO optimization
+  --enable-latx-syscall-tunnel
+                          enable syscall tunnel optimization
+  --enable-latx-insts-pattern
+                          enable instruction pattern optimization
+  Not impl.
+  --enable-latx-superblock
+                          enable superblock optimization just starting carry out
+  ====== Optimization Case ======
+  --optimize-O0           Close all optimization
+  --optimize-O1           Open stable optimization
+  --optimize-O2           Open unstable optimization
+  --optimize-O3           Open testing optimization
+  ====== Profiler Optional ======
+  --enable-latx-profiler  enable profiler and print when process exit
 
 Optional features, enabled with --enable-FEATURE and
 disabled with --disable-FEATURE, default is enabled if available
@@ -1800,7 +1934,6 @@ disabled with --disable-FEATURE, default is enabled if available
   system          all system emulation targets
   user            supported user emulation targets
   linux-user      all linux usermode emulation targets
-  bsd-user        all BSD usermode emulation targets
   docs            build documentation
   guest-agent     build the QEMU Guest Agent
   guest-agent-msi build guest agent Windows MSI installation package
@@ -1844,7 +1977,6 @@ disabled with --disable-FEATURE, default is enabled if available
   brlapi          BrlAPI (Braile)
   curl            curl connectivity
   membarrier      membarrier system call (for Linux 4.14+ or Windows)
-  fdt             fdt device tree
   kvm             KVM acceleration support
   hax             HAX acceleration support
   hvf             Hypervisor.framework acceleration support
@@ -1915,6 +2047,7 @@ disabled with --disable-FEATURE, default is enabled if available
   xkbcommon       xkbcommon support
   rng-none        dummy RNG, avoid using /dev/(u)random and getrandom()
   libdaxctl       libdaxctl support
+  tests           build tests
   fuse            FUSE block device export
   fuse-lseek      SEEK_HOLE/SEEK_DATA support for FUSE exports
   multiprocess    Out of process device emulation support
@@ -2090,6 +2223,7 @@ add_to nowarn_flags -Wno-string-plus-int
 add_to nowarn_flags -Wno-typedef-redefinition
 add_to nowarn_flags -Wno-tautological-type-limit-compare
 add_to nowarn_flags -Wno-psabi
+add_to nowarn_flags -Wno-array-bound
 
 gcc_flags="$warn_flags $nowarn_flags"
 
@@ -2297,12 +2431,6 @@ for target in $target_list; do
 done
 
 # see if system emulation was really requested
-case " $target_list " in
-  *"-softmmu "*) softmmu=yes
-  ;;
-  *) softmmu=no
-  ;;
-esac
 
 feature_not_found() {
   feature=$1
@@ -2336,21 +2464,6 @@ else
     echo big/little test failed
 fi
 
-##########################################
-# system tools
-if test -z "$want_tools"; then
-    if test "$softmmu" = "no"; then
-        want_tools=no
-    else
-        want_tools=yes
-    fi
-fi
-
-##########################################
-# Disable features only meaningful for system-mode emulation
-if test "$softmmu" = "no"; then
-    audio_drv_list=""
-fi
 
 ##########################################
 # Some versions of Mac OS X incorrectly define SIZE_MAX
@@ -3601,18 +3714,6 @@ if compile_prog "" "" ; then
 fi
 
 ##########################################
-# fdt probe
-
-case "$fdt" in
-  auto | enabled | internal)
-    # Simpler to always update submodule, even if not needed.
-    if test "$git_submodules_action" != "ignore"; then
-      git_submodules="${git_submodules} dtc"
-    fi
-    ;;
-esac
-
-##########################################
 # opengl probe (for sdl2, gtk, milkymist-tmu2)
 
 gbm="no"
@@ -3696,6 +3797,30 @@ main(void)
 EOF
 if compile_prog "" "" ; then
   inotify1=yes
+fi
+
+# Check for fanotify functions when we are building linux-user
+# emulator.  This is done because older glibc versions don't
+# have syscall stubs for these implemented.  In that case we
+# don't provide them even if kernel supports them.
+#
+fanotify=no
+echo "=====>"
+cat > $TMPC << EOF
+#include <fcntl.h>
+#include <sys/fanotify.h>
+
+int
+main(void)
+{
+	/* try to start inotify */
+	return fanotify_init(FAN_CLOEXEC | FAN_CLASS_CONTENT | FAN_NONBLOCK,
+                              O_RDONLY | O_LARGEFILE);
+}
+EOF
+if compile_prog "" "" ; then
+     echo "++++"
+  fanotify=yes
 fi
 
 # check if pipe2 is there
@@ -5374,9 +5499,7 @@ fi
 # Probe for guest agent support/options
 
 if [ "$guest_agent" != "no" ]; then
-  if [ "$softmmu" = no -a "$want_tools" = no ] ; then
-      guest_agent=no
-  elif [ "$linux" = "yes" -o "$bsd" = "yes" -o "$solaris" = "yes" -o "$mingw32" = "yes" ] ; then
+  if [ "$linux" = "yes" -o "$solaris" = "yes" -o "$mingw32" = "yes" ] ; then
       guest_agent=yes
   elif [ "$guest_agent" != yes ]; then
       guest_agent=no
@@ -5398,23 +5521,6 @@ if test "$QEMU_GA_VERSION" = ""; then
 fi
 
 QEMU_GA_MSI_MINGW_DLL_PATH="$($pkg_config --variable=prefix glib-2.0)/bin"
-
-# Mac OS X ships with a broken assembler
-roms=
-if { test "$cpu" = "i386" || test "$cpu" = "x86_64"; } && \
-        test "$targetos" != "Darwin" && test "$targetos" != "SunOS" && \
-        test "$targetos" != "Haiku" && test "$softmmu" = yes ; then
-    # Different host OS linkers have different ideas about the name of the ELF
-    # emulation. Linux and OpenBSD/amd64 use 'elf_i386'; FreeBSD uses the _fbsd
-    # variant; OpenBSD/i386 uses the _obsd variant; and Windows uses i386pe.
-    for emu in elf_i386 elf_i386_fbsd elf_i386_obsd i386pe; do
-        if "$ld" -verbose 2>&1 | grep -q "^[[:space:]]*$emu[[:space:]]*$"; then
-            ld_i386_emulation="$emu"
-            roms="optionrom"
-            break
-        fi
-    done
-fi
 
 # Only build s390-ccw bios if we're on s390x and the compiler has -march=z900
 if test "$cpu" = "s390x" ; then
@@ -5479,6 +5585,9 @@ echo "ARCH=$ARCH" >> $config_host_mak
 
 if test "$debug_tcg" = "yes" ; then
   echo "CONFIG_DEBUG_TCG=y" >> $config_host_mak
+else
+  QEMU_CFLAGS="-ffunction-sections -fdata-sections $QEMU_CFLAGS"
+  QEMU_LDFLAGS="$QEMU_LDFLAGS"
 fi
 if test "$strip_opt" = "yes" ; then
   echo "STRIP=${strip}" >> $config_host_mak
@@ -5523,6 +5632,95 @@ if test "$static" = "yes" ; then
 fi
 if test "$profiler" = "yes" ; then
   echo "CONFIG_PROFILER=y" >> $config_host_mak
+fi
+if test "$latx_new_world" = "yes" ; then
+  echo "CONFIG_LOONGARCH_NEW_WORLD=y" >> $config_host_mak
+fi
+if test "$latx" = "yes" ; then
+  if test "$latx_kzt" = "yes" ; then
+    echo "CONFIG_LATX_KZT=y" >> $config_host_mak
+  fi
+  echo "CONFIG_LATX=y" >> $config_host_mak
+  if test "$debug" = "yes" ; then
+    echo "CONFIG_LATX_DEBUG=y" >> $config_host_mak
+  else
+    QEMU_CFLAGS="$QEMU_CFLAGS -DNDEBUG"
+  fi
+  if test "$latx_insts_pattern" = "yes" ; then
+    echo "CONFIG_LATX_INSTS_PATTERN=y" >> $config_host_mak
+  fi
+  if test "$latx_flag_reduction" = "yes" ; then
+    echo "CONFIG_LATX_FLAG_REDUCTION=y" >> $config_host_mak
+  fi
+  if test "$latx_lsfpu" = "yes" ; then
+    echo "CONFIG_LATX_LSFPU=y" >> $config_host_mak
+  fi
+  if test "$latx_tunnel_lib" = "yes" ; then
+    echo "CONFIG_LATX_TUNNEL_LIB=y" >> $config_host_mak
+  fi
+  if test "$latx_syscall_tunnel" = "yes" ; then
+    echo "CONFIG_LATX_SYSCALL_TUNNEL=y" >> $config_host_mak
+  fi
+  if test "$latx_tbmini_enable" = "yes" ; then
+    echo "CONFIG_LATX_TBMINI_ENABLE=y" >> $config_host_mak
+  fi
+  if test "$latx_runtime_trace_range" = "yes" ; then
+    echo "CONFIG_LATX_RUNTIME_TRACE_RANGE=y" >> $config_host_mak
+  fi
+  if test "$latx_jrra" = "yes" ; then
+    echo "CONFIG_LATX_JRRA=y" >> $config_host_mak
+  fi
+  if test "$latx_aot" = "yes" ; then
+    echo "CONFIG_LATX_AOT=y" >> $config_host_mak
+  fi
+  if test "$mimalloc" = "yes" ; then
+    echo "CONFIG_MIMALLOC=y" >> $config_host_mak
+  fi
+  if test "$latx_llsc" = "yes" ; then
+    echo "CONFIG_LATX_LLSC=y" >> $config_host_mak
+  fi
+  if test "$latx_opt_O0" = "yes" ; then
+    echo "CONFIG_LATX_O0=y" >> $config_host_mak
+  elif test "$latx_opt_O1" = "yes" ; then
+    echo "CONFIG_LATX_O1=y" >> $config_host_mak
+  elif test "$latx_opt_O2" = "yes" ; then
+    echo "CONFIG_LATX_O2=y" >> $config_host_mak
+  elif test "$latx_opt_O3" = "yes" ; then
+    echo "CONFIG_LATX_O3=y" >> $config_host_mak
+  elif test "$latx_opt_Ofast" = "yes" ; then
+    echo "CONFIG_LATX_OFAST=y" >> $config_host_mak
+  fi
+  if test "$latx_16k_debug" = "yes" ; then
+    echo "CONFIG_LATX_16K_DEBUG=y" >> $config_host_mak
+  fi
+  if test "$latx_profiler" = "yes" ; then
+    echo "CONFIG_LATX_PROFILER=y" >> $config_host_mak
+    echo "CONFIG_PROFILER=y" >> $config_host_mak
+  fi
+  if test "$latx_perf" = "yes" ; then
+    echo "CONFIG_LATX_PERF=y" >> $config_host_mak
+  fi
+  if test "$latx_superblock" = "yes" ; then
+    echo "CONFIG_LATX_SUPERBLOCK=y" >> $config_host_mak
+  fi
+  if test "$latx_capstone_git" = "yes" ; then
+  echo "CONFIG_LATX_CAPSTONE_GIT=y" >> $config_host_mak
+  fi
+  if test "$latx_atomic" = "yes" ; then
+  echo "CONFIG_LATX_ATOMIC=y" >> $config_host_mak
+  fi
+  if test "$latx_xcomisx_opt" = "yes" ; then
+  echo "CONFIG_LATX_XCOMISX_OPT=y" >> $config_host_mak
+  fi
+  if test "$capstone_diet" = "yes" ; then
+    echo "CONFIG_CAPSTONE_DIET=y" >> $config_host_mak
+  fi
+fi
+if test "$ptrace_debug" = "yes" ; then
+  echo "CONFIG_PTRACE_DEBUG=y" >> $config_host_mak
+fi
+if test "$guest_base_zero" = "yes" ; then
+  echo "CONFIG_GUEST_BASE_ZERO=y" >> $config_host_mak
 fi
 if test "$want_tools" = "yes" ; then
   echo "CONFIG_TOOLS=y" >> $config_host_mak
@@ -5658,6 +5856,9 @@ if test "$inotify" = "yes" ; then
 fi
 if test "$inotify1" = "yes" ; then
   echo "CONFIG_INOTIFY1=y" >> $config_host_mak
+fi
+if test "$fanotify" = "yes" ; then
+  echo "CONFIG_FANOTIFY=y" >> $config_host_mak
 fi
 if test "$sem_timedwait" = "yes" ; then
   echo "CONFIG_SEM_TIMEDWAIT=y" >> $config_host_mak
@@ -5850,11 +6051,6 @@ fi
 
 if test "$avx512f_opt" = "yes" ; then
   echo "CONFIG_AVX512F_OPT=y" >> $config_host_mak
-fi
-
-# XXX: suppress that
-if [ "$bsd" = "yes" ] ; then
-  echo "CONFIG_BSD=y" >> $config_host_mak
 fi
 
 if test "$qom_cast_debug" = "yes" ; then
@@ -6300,7 +6496,8 @@ done
   export $i
 done
 export target_list source_path use_containers ARCH
-$source_path/tests/tcg/configure.sh)
+#$source_path/tests/tcg/configure.sh
+)
 
 # temporary config to build submodules
 for rom in seabios; do
@@ -6415,7 +6612,7 @@ NINJA=$ninja $meson setup \
         -Dcocoa=$cocoa -Dgtk=$gtk -Dmpath=$mpath -Dsdl=$sdl -Dsdl_image=$sdl_image \
         -Dvnc=$vnc -Dvnc_sasl=$vnc_sasl -Dvnc_jpeg=$vnc_jpeg -Dvnc_png=$vnc_png \
         -Dgettext=$gettext -Dxkbcommon=$xkbcommon -Du2f=$u2f -Dvirtiofsd=$virtiofsd \
-        -Dcapstone=$capstone -Dslirp=$slirp -Dfdt=$fdt -Dbrlapi=$brlapi \
+        -Dcapstone=$capstone -Dslirp=$slirp -Dbrlapi=$brlapi \
         -Dcurl=$curl -Dglusterfs=$glusterfs -Dbzip2=$bzip2 -Dlibiscsi=$libiscsi \
         -Dlibnfs=$libnfs -Diconv=$iconv -Dcurses=$curses -Dlibudev=$libudev\
         -Drbd=$rbd -Dlzo=$lzo -Dsnappy=$snappy -Dlzfse=$lzfse \
@@ -6426,6 +6623,7 @@ NINJA=$ninja $meson setup \
         -Dfuse=$fuse -Dfuse_lseek=$fuse_lseek -Dguest_agent_msi=$guest_agent_msi \
         $(if test "$default_features" = no; then echo "-Dauto_features=disabled"; fi) \
 	-Dtcg_interpreter=$tcg_interpreter \
+        -Dtests=$tests \
         $cross_arg \
         "$PWD" "$source_path"
 

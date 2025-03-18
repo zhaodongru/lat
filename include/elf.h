@@ -1,6 +1,10 @@
 #ifndef QEMU_ELF_H
 #define QEMU_ELF_H
 
+#ifndef _ELF_H
+#define _ELF_H 1
+
+#include <stdint.h>
 /* 32-bit ELF base types. */
 typedef uint32_t Elf32_Addr;
 typedef uint16_t Elf32_Half;
@@ -32,6 +36,8 @@ typedef int64_t  Elf64_Sxword;
 #define PT_HIPROC  0x7fffffff
 
 #define PT_GNU_PROPERTY   (PT_LOOS + 0x474e553)
+#define PT_GNU_STACK    (PT_LOOS + 0x474e551)
+#define PT_GNU_EH_FRAME     0x6474e550
 
 #define PT_MIPS_REGINFO   0x70000000
 #define PT_MIPS_RTPROC    0x70000001
@@ -182,6 +188,8 @@ typedef struct mips_elf_abiflags_v0 {
 #define EM_RISCV        243     /* RISC-V */
 
 #define EM_NANOMIPS     249     /* Wave Computing nanoMIPS */
+
+#define EM_LOONGARCH	258	/* Loongarch */
 
 /*
  * This is an interim value that we will use until the committee comes
@@ -1066,7 +1074,8 @@ typedef struct {
 #define R_X86_64_8		14	/* Direct 8 bit sign extended  */
 #define R_X86_64_PC8		15	/* 8 bit sign extended pc relative */
 
-#define R_X86_64_NUM		16
+/* Old value is 16, but in standard elf.h the define is 43 */
+//#define R_X86_64_NUM		16
 
 /* Legal values for e_flags field of Elf64_Ehdr.  */
 
@@ -1413,6 +1422,35 @@ typedef struct {
 #define EF_RISCV_FLOAT_ABI_QUAD   0x0006
 #define EF_RISCV_RVE              0x0008
 #define EF_RISCV_TSO              0x0010
+
+/* LoongArch relocations */
+#define R_LARCH_NONE                            0
+#define R_LARCH_32                              1
+#define R_LARCH_64                              2
+#define R_LOONGARCH_BRANCH                      3
+#define R_LOONGARCH_JUMP                        4
+#define R_LARCH_MARK_LA                         20
+#define R_LARCH_MARK_PCREL                      21
+#define R_LARCH_SOP_PUSH_PCREL                  22
+#define R_LARCH_SOP_PUSH_ABSOLUTE               23
+#define R_LARCH_SOP_PUSH_PLT_PCREL              29
+#define R_LARCH_SOP_SUB                         32
+#define R_LARCH_SOP_SL                          33
+#define R_LARCH_SOP_SR                          34
+#define R_LARCH_SOP_ADD                         35
+#define R_LARCH_SOP_AND                         36
+#define R_LARCH_SOP_IF_ELSE                     37
+#define R_LARCH_SOP_POP_32_S_10_5               38
+#define R_LARCH_SOP_POP_32_U_10_12              39
+#define R_LARCH_SOP_POP_32_S_10_12              40
+#define R_LARCH_SOP_POP_32_S_10_16              41
+#define R_LARCH_SOP_POP_32_S_10_16_S2           42
+#define R_LARCH_SOP_POP_32_S_5_20               43
+#define R_LARCH_SOP_POP_32_S_0_5_10_16_S2       44
+#define R_LARCH_SOP_POP_32_S_0_10_10_16_S2      45
+#define R_LARCH_SOP_POP_32_U                    46
+#define R_LARCH_ADD64                           51
+#define R_LARCH_SUB64                           56
 
 typedef struct elf32_rel {
   Elf32_Addr	r_offset;
@@ -1771,5 +1809,109 @@ struct elf32_fdpic_loadmap {
 
 #endif /* ELF_CLASS */
 
+typedef struct
+{
+  Elf64_Half    vn_version;     /* Version of structure */
+  Elf64_Half    vn_cnt;         /* Number of associated aux entries */
+  Elf64_Word    vn_file;        /* Offset of filename for this
+                       dependency */
+  Elf64_Word    vn_aux;         /* Offset in bytes to vernaux array */
+  Elf64_Word    vn_next;        /* Offset in bytes to next verneed
+                       entry */
+} Elf64_Verneed;
 
+typedef struct
+{
+  Elf64_Half    vd_version;     /* Version revision */
+  Elf64_Half    vd_flags;       /* Version information */
+  Elf64_Half    vd_ndx;         /* Version Index */
+  Elf64_Half    vd_cnt;         /* Number of associated aux entries */
+  Elf64_Word    vd_hash;        /* Version name hash value */
+  Elf64_Word    vd_aux;         /* Offset in bytes to verdaux array */
+  Elf64_Word    vd_next;        /* Offset in bytes to next verdef
+                       entry */
+} Elf64_Verdef;
+
+typedef struct
+{
+  Elf64_Word    vna_hash;       /* Hash value of dependency name */
+  Elf64_Half    vna_flags;      /* Dependency specific information */
+  Elf64_Half    vna_other;      /* Unused */
+  Elf64_Word    vna_name;       /* Dependency name string offset */
+  Elf64_Word    vna_next;       /* Offset in bytes to next vernaux
+                       entry */
+} Elf64_Vernaux;
+
+typedef struct
+{
+  Elf64_Word    vda_name;       /* Version or dependency names */
+  Elf64_Word    vda_next;       /* Offset in bytes to next verdaux
+                       entry */
+} Elf64_Verdaux;
+
+#define SHN_XINDEX  0xffff      /* Index is in extra table.  */
+#define DT_PREINIT_ARRAYSZ 33       /* size in bytes of DT_PREINIT_ARRAY */
+
+#define SHT_INIT_ARRAY    14        /* Array of constructors */
+#define SHT_FINI_ARRAY    15        /* Array of destructors */
+#define SHT_PREINIT_ARRAY 16        /* Array of pre-constructors */
+#define SHT_GROUP     17        /* Section group */
+#define SHT_SYMTAB_SHNDX  18        /* Extended section indeces */
+
+#define DT_BIND_NOW 24      /* Process relocations of object */
+#define DT_RUNPATH  29      /* Library search path */
+#define DT_ENCODING 32      /* Start of encoded range */
+
+#define PT_TLS      7       /* Thread-local storage segment */
+
+#define STT_NOTYPE  0
+#define STT_OBJECT  1
+#define STT_FUNC    2
+#define STT_SECTION 3
+#define STT_FILE    4
+#define STT_COMMON  5       /* Symbol is a common data object */
+#define STT_TLS     6       /* Symbol is thread-local data object*/
+
+#define STV_DEFAULT 0       /* Default symbol visibility rules */
+#define STV_PROTECTED   3       /* Not preemptible, not exported */
+
+#define STB_GNU_UNIQUE  10      /* Unique symbol.  */
+
+#define R_X86_64_DTPMOD64   16  /* ID of module containing symbol */
+#define R_X86_64_DTPOFF64   17  /* Offset in module's TLS block */
+#define R_X86_64_TPOFF64    18  /* Offset in initial TLS block */
+#define R_X86_64_TLSGD      19  /* 32 bit signed PC relative offset
+                        to two GOT entries for GD symbol */
+#define R_X86_64_TLSLD      20  /* 32 bit signed PC relative offset
+                        to two GOT entries for LD symbol */
+#define R_X86_64_DTPOFF32   21  /* Offset in TLS block */
+#define R_X86_64_GOTTPOFF   22  /* 32 bit signed PC relative offset
+                        to GOT entry for IE symbol */
+#define R_X86_64_TPOFF32    23  /* Offset in initial TLS block */
+#define R_X86_64_PC64       24  /* PC relative 64 bit */
+#define R_X86_64_GOTOFF64   25  /* 64 bit offset to GOT */
+#define R_X86_64_GOTPC32    26  /* 32 bit signed pc relative
+                        offset to GOT */
+#define R_X86_64_GOT64      27  /* 64-bit GOT entry offset */
+#define R_X86_64_GOTPCREL64 28  /* 64-bit PC relative offset
+                        to GOT entry */
+#define R_X86_64_GOTPC64    29  /* 64-bit PC relative offset to GOT */
+#define R_X86_64_GOTPLT64   30  /* like GOT64, says PLT entry needed */
+#define R_X86_64_PLTOFF64   31  /* 64-bit GOT relative offset
+                        to PLT entry */
+#define R_X86_64_SIZE32     32  /* Size of symbol plus 32-bit addend */
+#define R_X86_64_SIZE64     33  /* Size of symbol plus 64-bit addend */
+#define R_X86_64_GOTPC32_TLSDESC 34 /* GOT offset for TLS descriptor.  */
+#define R_X86_64_TLSDESC_CALL   35  /* Marker for call through TLS
+                        descriptor.  */
+#define R_X86_64_TLSDESC        36  /* TLS descriptor.  */
+#define R_X86_64_IRELATIVE  37  /* Adjust indirectly by program base */
+#define R_X86_64_RELATIVE64 38  /* 64-bit adjust by program base */
+#define R_X86_64_GOTPCRELX  41  /* Load from 32 bit signed pc relative
+                        offset to GOT entry without REX prefix, relaxable.  */
+#define R_X86_64_REX_GOTPCRELX  42  /* Load from 32 bit signed pc relative
+                        offset to GOT entry with REX prefix, relaxable.  */
+#define R_X86_64_NUM        43
+
+#endif /* _ELF_H */
 #endif /* QEMU_ELF_H */

@@ -140,7 +140,7 @@ static QObject *qobject_input_try_get_object(QObjectInputVisitor *qiv,
         assert(name);
         ret = qdict_get(qobject_to(QDict, qobj), name);
         if (tos->h && consume && ret) {
-            bool removed = g_hash_table_remove(tos->h, name);
+            bool removed __attribute__((unused)) = g_hash_table_remove(tos->h, name);
             assert(removed);
         }
     } else {
@@ -305,7 +305,7 @@ static bool qobject_input_start_struct(Visitor *v, const char *name, void **obj,
 static void qobject_input_end_struct(Visitor *v, void **obj)
 {
     QObjectInputVisitor *qiv = to_qiv(v);
-    StackObject *tos = QSLIST_FIRST(&qiv->stack);
+    StackObject *tos __attribute__((unused)) = QSLIST_FIRST(&qiv->stack);
 
     assert(qobject_type(tos->obj) == QTYPE_QDICT && tos->h);
     qobject_input_pop(v, obj);
@@ -372,7 +372,7 @@ static bool qobject_input_check_list(Visitor *v, Error **errp)
 static void qobject_input_end_list(Visitor *v, void **obj)
 {
     QObjectInputVisitor *qiv = to_qiv(v);
-    StackObject *tos = QSLIST_FIRST(&qiv->stack);
+    StackObject *tos __attribute__((unused)) = QSLIST_FIRST(&qiv->stack);
 
     assert(qobject_type(tos->obj) == QTYPE_QLIST && !tos->h);
     qobject_input_pop(v, obj);

@@ -58,7 +58,7 @@ trace_events_all = custom_target('trace-events-all',
                                  input: trace_events_files,
                                  command: [ 'cat', '@INPUT@' ],
                                  capture: true,
-                                 install: true,
+                                 install: false,
                                  install_dir: qemu_datadir)
 
 foreach d : [

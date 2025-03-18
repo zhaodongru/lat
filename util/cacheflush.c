@@ -10,7 +10,8 @@
 #include "qemu/bitops.h"
 
 
-#if defined(__i386__) || defined(__x86_64__) || defined(__s390__)
+#if defined(__i386__) || defined(__x86_64__) || defined(__s390__) \
+    || defined(__loongarch__)
 
 /* Caches are coherent and do not require flushing; symbol inline. */
 

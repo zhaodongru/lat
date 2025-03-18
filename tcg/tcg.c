@@ -163,14 +163,18 @@ const void *tcg_code_gen_epilogue;
 uintptr_t tcg_splitwx_diff;
 
 #ifndef CONFIG_TCG_INTERPRETER
+#ifndef CONFIG_LATX
 tcg_prologue_fn *tcg_qemu_tb_exec;
 #endif
+#endif
 
+#ifndef CONFIG_LATX_TBMINI_ENABLE
 struct tcg_region_tree {
     QemuMutex lock;
     GTree *tree;
     /* padding to avoid false sharing is computed at run-time */
 };
+#endif
 
 /*
  * We divide code_gen_buffer into equally-sized "regions" that TCG threads
@@ -195,6 +199,7 @@ struct tcg_region_state {
 };
 
 static struct tcg_region_state region;
+#ifndef CONFIG_LATX_TBMINI_ENABLE
 /*
  * This is an array of struct tcg_region_tree's, with padding.
  * We use void * to simplify the computation of region_trees[i]; each
@@ -202,6 +207,7 @@ static struct tcg_region_state region;
  */
 static void *region_trees;
 static size_t tree_size;
+#endif
 static TCGRegSet tcg_target_available_regs[TCG_TYPE_COUNT];
 static TCGRegSet tcg_target_call_clobber_regs;
 
@@ -458,6 +464,7 @@ static const TCGTargetOpDef constraint_sets[] = {
 
 #include "tcg-target.c.inc"
 
+#ifndef CONFIG_LATX_TBMINI_ENABLE
 /* compare a pointer @ptr and a tb_tc @s */
 static int ptr_cmp_tb_tc(const void *ptr, const struct tb_tc *s)
 {
@@ -545,6 +552,9 @@ static struct tcg_region_tree *tc_ptr_to_region_tree(const void *p)
 
 void tcg_tb_insert(TranslationBlock *tb)
 {
+#ifndef CONFIG_LATX_TU
+    lsassertm(tb->tc.size, "LATX-ERR %s\n", __func__);
+#endif
     struct tcg_region_tree *rt = tc_ptr_to_region_tree(tb->tc.ptr);
 
     g_assert(rt != NULL);
@@ -657,6 +667,32 @@ static void tcg_region_tree_reset_all(void)
     }
     tcg_region_tree_unlock_all();
 }
+#else
+static void *tcg_tb_lookup_fast(uintptr_t tc_ptr)
+{
+    if (!in_code_gen_buffer((void *)tc_ptr)) {
+        return NULL;
+    }
+    TBMini *tbm = (TBMini *)(ROUND_DOWN((uintptr_t)tc_ptr,
+                qemu_icache_linesize) - sizeof(struct TBMini));
+    while (tbm->mtbp_struct.magic != TB_MAGIC) {
+        tbm = (TBMini *)((uint64_t)tbm - CODE_GEN_ALIGN);
+    }
+    void *tb = (void *)(tbm->mtbp_uint64 &
+                MAKE_64BIT_MASK(0, HOST_VIRT_ADDR_SPACE_BITS));
+    return tb;
+}
+
+TranslationBlock *tcg_tb_lookup(uintptr_t tc_ptr)
+{
+    return tcg_tb_lookup_fast(tc_ptr);
+}
+
+void tcg_tb_insert(TranslationBlock *tb) {}
+void tcg_tb_remove(TranslationBlock *tb) {}
+void tcg_tb_foreach(GTraverseFunc func, gpointer user_data) {}
+size_t tcg_nb_tbs(void) { return 0; }
+#endif
 
 static void tcg_region_bounds(size_t curr_region, void **pstart, void **pend)
 {
@@ -686,6 +722,13 @@ static void tcg_region_assign(TCGContext *s, size_t curr_region)
     s->code_gen_ptr = start;
     s->code_gen_buffer_size = end - start;
     s->code_gen_highwater = end - TCG_HIGHWATER;
+    s->tb_gen_ptr = s->tb_gen_buffer;
+#if defined(CONFIG_LATX_TBMINI_ENABLE)
+    /* leave space for TBMini for the 1st TB */
+    if (option_split_tb) {
+        s->code_gen_ptr += qemu_icache_linesize;
+    }
+#endif
 }
 
 static bool tcg_region_alloc__locked(TCGContext *s)
@@ -744,7 +787,9 @@ void tcg_region_reset_all(void)
     }
     qemu_mutex_unlock(&region.lock);
 
+#if !defined(CONFIG_LATX_TBMINI_ENABLE)
     tcg_region_tree_reset_all();
+#endif
 }
 
 #ifdef CONFIG_USER_ONLY
@@ -873,7 +918,9 @@ void tcg_region_init(void)
         (void)qemu_mprotect_none(end, page_size);
     }
 
+#if !defined(CONFIG_LATX_TBMINI_ENABLE)
     tcg_region_trees_init();
+#endif
 
     /* In user-mode we support only one ctx, so do the initial allocation now */
 #ifdef CONFIG_USER_ONLY
@@ -1180,6 +1227,8 @@ void tcg_context_init(TCGContext *s)
     cpu_env = temp_tcgv_ptr(ts);
 }
 
+static struct separated_data s_data;
+
 /*
  * Allocate TBs right before their corresponding translated code, making
  * sure that TBs and code are on different cache lines.
@@ -1191,9 +1240,21 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     void *next;
 
  retry:
-    tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
-    next = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
-
+    if (option_split_tb) {
+        tb = (void *)ROUND_UP((uintptr_t)s->tb_gen_ptr, align);
+        void *next_tb = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+        if (unlikely(next_tb > s->tb_gen_highwater)) {
+            if (tcg_region_alloc(s)) {
+                return NULL;
+            }
+            goto retry;
+        }
+        qatomic_set(&s->tb_gen_ptr, next_tb);
+        next = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
+    } else {
+        tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
+        next = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+    }
     if (unlikely(next > s->code_gen_highwater)) {
         if (tcg_region_alloc(s)) {
             return NULL;
@@ -1202,6 +1263,43 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     }
     qatomic_set(&s->code_gen_ptr, next);
     s->data_gen_ptr = NULL;
+    tb->s_data = &s_data;
+    return tb;
+}
+
+TranslationBlock *tcg_tb_alloc_full(TCGContext *s)
+{
+    uintptr_t align = qemu_icache_linesize;
+    TranslationBlock *tb;
+    void *next;
+    struct separated_data *new_s_data;
+ retry:
+    if (option_split_tb) {
+        tb = (void *)ROUND_UP((uintptr_t)s->tb_gen_ptr, align);
+        new_s_data = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+        void *next_tb = (void *)ROUND_UP((uintptr_t)(new_s_data + 1), align);
+        if (unlikely(next_tb > s->tb_gen_highwater)) {
+            if (tcg_region_alloc(s)) {
+                return NULL;
+            }
+            goto retry;
+        }
+        qatomic_set(&s->tb_gen_ptr, next_tb);
+        next = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
+    } else {
+        tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
+        new_s_data = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
+        next = (void *)ROUND_UP((uintptr_t)(new_s_data + 1), align);
+    }
+    if (unlikely(next > s->code_gen_highwater)) {
+        if (tcg_region_alloc(s)) {
+            return NULL;
+        }
+        goto retry;
+    }
+    qatomic_set(&s->code_gen_ptr, next);
+    s->data_gen_ptr = NULL;
+    tb->s_data = new_s_data;
     return tb;
 }
 
@@ -1225,7 +1323,9 @@ void tcg_prologue_init(TCGContext *s)
     region.end = buf0 + total_size;
 
 #ifndef CONFIG_TCG_INTERPRETER
+#ifndef CONFIG_LATX
     tcg_qemu_tb_exec = (tcg_prologue_fn *)tcg_splitwx_to_rx(buf0);
+#endif
 #endif
 
     /* Compute a high-water mark, at which we voluntarily flush the buffer
@@ -1264,6 +1364,10 @@ void tcg_prologue_init(TCGContext *s)
     s->code_gen_buffer_size = total_size;
 
     tcg_register_jit(tcg_splitwx_to_rx(s->code_gen_buffer), total_size);
+
+    if (option_split_tb) {
+        s->tb_gen_ptr = s->tb_gen_buffer;
+    }
 
 #ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_OUT_ASM)) {
@@ -4506,6 +4610,22 @@ void tcg_profile_snapshot(TCGProfile *prof, bool counters, bool table)
             PROF_ADD(prof, orig, opt_time);
             PROF_ADD(prof, orig, restore_count);
             PROF_ADD(prof, orig, restore_time);
+#ifdef CONFIG_LATX_PROFILER
+            PROF_ADD(prof, orig, acc_spage_count);
+            PROF_ADD(prof, orig, acc_spage_pnone_count);
+            PROF_ADD(prof, orig, tr_disasm_time);
+            PROF_ADD(prof, orig, tr_trans_time);
+            PROF_ADD(prof, orig, tr_asm_time);
+            PROF_ADD(prof, orig, trans_init_time);
+            PROF_ADD(prof, orig, trans_fini_time);
+            PROF_ADD(prof, orig, hash_count);
+            PROF_ADD(prof, orig, qht_count);
+            PROF_ADD(prof, orig, flag_rdtn_search);
+            PROF_ADD(prof, orig, flag_rdtn_pass1);
+            PROF_ADD(prof, orig, flag_rdtn_pass2);
+            PROF_ADD(prof, orig, flag_rdtn_times);
+            PROF_ADD(prof, orig, flag_rdtn_stimes);
+#endif
         }
         if (table) {
             int i;
@@ -4811,48 +4931,86 @@ void tcg_dump_info(void)
     tb_div_count = tb_count ? tb_count : 1;
     tot = s->interm_time + s->code_time;
 
-    qemu_printf("JIT cycles          %" PRId64 " (%0.3f s at 2.4 GHz)\n",
-                tot, tot / 2.4e9);
-    qemu_printf("translated TBs      %" PRId64 " (aborted=%" PRId64
+    qemu_log("\nTCG Profile:\n");
+    qemu_log("JIT time (ns)       %" PRId64 " (%0.5f s)\n",
+                tot, tot / 1e9);
+    qemu_log("translated TBs      %" PRId64 " (aborted=%" PRId64
                 " %0.1f%%)\n",
                 tb_count, s->tb_count1 - tb_count,
                 (double)(s->tb_count1 - s->tb_count)
                 / (s->tb_count1 ? s->tb_count1 : 1) * 100.0);
-    qemu_printf("avg ops/TB          %0.1f max=%d\n",
+    qemu_log("avg ops/TB          %0.1f max=%d\n",
                 (double)s->op_count / tb_div_count, s->op_count_max);
-    qemu_printf("deleted ops/TB      %0.2f\n",
+    qemu_log("deleted ops/TB      %0.2f\n",
                 (double)s->del_op_count / tb_div_count);
-    qemu_printf("avg temps/TB        %0.2f max=%d\n",
+    qemu_log("avg temps/TB        %0.2f max=%d\n",
                 (double)s->temp_count / tb_div_count, s->temp_count_max);
-    qemu_printf("avg host code/TB    %0.1f\n",
+    qemu_log("avg host code/TB    %0.1f\n",
                 (double)s->code_out_len / tb_div_count);
-    qemu_printf("avg search data/TB  %0.1f\n",
+    qemu_log("avg search data/TB  %0.1f\n",
                 (double)s->search_out_len / tb_div_count);
     
-    qemu_printf("cycles/op           %0.1f\n",
+    qemu_log("ns/op               %0.1f\n",
                 s->op_count ? (double)tot / s->op_count : 0);
-    qemu_printf("cycles/in byte      %0.1f\n",
+    qemu_log("ns/in byte          %0.1f\n",
                 s->code_in_len ? (double)tot / s->code_in_len : 0);
-    qemu_printf("cycles/out byte     %0.1f\n",
+    qemu_log("ns/out byte         %0.1f\n",
                 s->code_out_len ? (double)tot / s->code_out_len : 0);
-    qemu_printf("cycles/search byte     %0.1f\n",
+    qemu_log("ns/search byte      %0.1f\n",
                 s->search_out_len ? (double)tot / s->search_out_len : 0);
     if (tot == 0) {
         tot = 1;
     }
-    qemu_printf("  gen_interm time   %0.1f%%\n",
-                (double)s->interm_time / tot * 100.0);
-    qemu_printf("  gen_code time     %0.1f%%\n",
-                (double)s->code_time / tot * 100.0);
-    qemu_printf("optim./code time    %0.1f%%\n",
+    qemu_log("  gen_interm time   %0.1f%% (ns: %" PRId64 ")\n",
+                (double)s->interm_time / tot * 100.0, s->interm_time);
+    qemu_log("  gen_code time     %0.1f%% (ns: %" PRId64 ")\n",
+                (double)s->code_time / tot * 100.0, s->code_time);
+    qemu_log("optim./code time    %0.1f%% (ns: %" PRId64 ")\n",
                 (double)s->opt_time / (s->code_time ? s->code_time : 1)
-                * 100.0);
-    qemu_printf("liveness/code time  %0.1f%%\n",
+                * 100.0, s->opt_time);
+    qemu_log("liveness/code time  %0.1f%%\n",
                 (double)s->la_time / (s->code_time ? s->code_time : 1) * 100.0);
-    qemu_printf("cpu_restore count   %" PRId64 "\n",
+    qemu_log("cpu_restore count   %" PRId64 "\n",
                 s->restore_count);
-    qemu_printf("  avg cycles        %0.1f\n",
+    qemu_log("  avg time (ns)     %0.1f\n",
                 s->restore_count ? (double)s->restore_time / s->restore_count : 0);
+#ifdef CONFIG_LATX_PROFILER
+    qemu_log("\nShared private interpret Profile:\n");
+    qemu_log(" ├ acc spage:       %" PRId64 "\n", s->acc_spage_count);
+    qemu_log(" └ acc spage pnone  %" PRId64 "\n",
+                s->acc_spage_pnone_count);
+    qemu_log("\nTranslation Profile:\n");
+    qemu_log(" ├ tr_disasm_time   %0.1f%% (%" PRId64 ")\n",
+                (double)s->tr_disasm_time / s->code_time * 100.0,
+                s->tr_disasm_time);
+    qemu_log(" ├ tr_trans_time    %0.1f%% (%" PRId64 ")\n",
+                (double)s->tr_trans_time / s->code_time * 100.0,
+                s->tr_trans_time);
+    qemu_log(" ├ tr_asm_time      %0.1f%% (%" PRId64 ")\n",
+                (double)s->tr_asm_time / s->code_time * 100.0,
+                s->tr_asm_time);
+    qemu_log(" ├ trans_init_time  %0.1f%% (%" PRId64 ")\n",
+                (double)s->trans_init_time / s->code_time * 100.0,
+                s->trans_init_time);
+    qemu_log(" └ trans_fini_time   %0.1f%% (%" PRId64 ")\n",
+                (double)s->trans_fini_time / s->code_time * 100.0,
+                s->trans_fini_time);
+    qemu_log("\nTB find Profile:\n");
+    qemu_log(" ├ fast path:        %" PRId64 "\n", s->hash_count);
+    qemu_log(" └ qht path:         %" PRId64 "\n", s->qht_count);
+    qemu_log("hash hit ratio:      %0.1f%%\n",
+                (double)s->hash_count / (s->hash_count + s->qht_count) * 100.0);
+
+    /* Flag reduction */
+    qemu_log("\nFlag reduction Profile:\n");
+    qemu_log("cross tb search cycles        %" PRId64 "\n", s->flag_rdtn_search);
+    qemu_log("inner tb search pass 1 cycles %" PRId64 "\n", s->flag_rdtn_pass1);
+    qemu_log("inner tb search pass 2 cycles %" PRId64 "\n", s->flag_rdtn_pass2);
+    qemu_log("flag rdtn search times        %" PRId64 "\n", s->flag_rdtn_times);
+    qemu_log(" └ search next TB times       %" PRId64 " (%0.1f%%)\n",
+                s->flag_rdtn_stimes,
+                (double)s->flag_rdtn_stimes / s->flag_rdtn_times * 100);
+#endif
 }
 #else
 void tcg_dump_info(void)

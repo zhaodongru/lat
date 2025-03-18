@@ -32,7 +32,7 @@ static const VuDevIface iface = {
 int
 main(int argc, const char *argv[])
 {
-    bool rc;
+    bool rc __attribute__((unused));
     uint16_t max_queues = 2;
     int socket = 0;
     VuDev dev = { 0, };

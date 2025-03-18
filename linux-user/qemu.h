@@ -37,6 +37,7 @@ struct image_info {
         abi_ulong       start_mmap;
         abi_ulong       start_stack;
         abi_ulong       stack_limit;
+        abi_ulong       vdso;
         abi_ulong       entry;
         abi_ulong       code_offset;
         abi_ulong       data_offset;
@@ -50,7 +51,7 @@ struct image_info {
         uint32_t        elf_flags;
         int		personality;
         abi_ulong       alignment;
-
+        abi_ulong       exec_entry;
         /* The fields below are used in FDPIC mode.  */
         abi_ulong       loadmap_addr;
         uint16_t        nsegs;
@@ -58,6 +59,7 @@ struct image_info {
         abi_ulong       pt_dynamic_addr;
         abi_ulong       interpreter_loadmap_addr;
         abi_ulong       interpreter_pt_dynamic_addr;
+        char *              interpreter_path;
         struct image_info *other_info;
 
         /* For target-specific processing of NT_GNU_PROPERTY_TYPE_0. */
@@ -68,6 +70,7 @@ struct image_info {
         int             interp_fp_abi;
 #endif
 };
+extern struct image_info info1, *info;
 
 #ifdef TARGET_I386
 /* Information about the current linux thread */
@@ -157,9 +160,11 @@ typedef struct TaskState {
 
     /* This thread's sigaltstack, if it has one */
     struct target_sigaltstack sigaltstack_used;
+    void* ptrace_poke_page;
 } __attribute__((aligned(16))) TaskState;
 
 extern char *exec_path;
+extern char *real_path;
 void init_task_state(TaskState *ts);
 void task_settid(TaskState *);
 void stop_all_tasks(void);
@@ -168,24 +173,69 @@ extern unsigned long mmap_min_addr;
 
 /* ??? See if we can avoid exposing so much of the loader internals.  */
 
+typedef struct {
+    const void *cache;
+    unsigned int cache_size;
+    int fd;
+} ImageSource;
+
+/**
+ * imgsrc_read: Read from ImageSource
+ * @dst: destination for read
+ * @offset: offset within file for read
+ * @len: size of the read
+ * @img: ImageSource to read from
+ * @errp: Error details.
+ *
+ * Read into @dst, using the cache when possible.
+ */
+bool imgsrc_read(void *dst, off_t offset, size_t len,
+                 const ImageSource *img, Error **errp);
+
+/**
+ * imgsrc_read_alloc: Read from ImageSource
+ * @offset: offset within file for read
+ * @size: size of the read
+ * @img: ImageSource to read from
+ * @errp: Error details.
+ *
+ * Read into newly allocated memory, using the cache when possible.
+ */
+void *imgsrc_read_alloc(off_t offset, size_t len,
+                        const ImageSource *img, Error **errp);
+
+/**
+ * imgsrc_mmap: Map from ImageSource
+ *
+ * If @src has a file descriptor, pass on to target_mmap.  Otherwise,
+ * this is "mapping" from a host buffer, which resolves to memcpy.
+ * Therefore, flags must be MAP_PRIVATE | MAP_FIXED; the argument is
+ * retained for clarity.
+ */
+abi_long imgsrc_mmap(abi_ulong start, abi_ulong len, int prot,
+                     int flags, const ImageSource *src, abi_ulong offset);
+
 /* Read a good amount of data initially, to hopefully get all the
    program headers loaded.  */
 #define BPRM_BUF_SIZE  1024
-
+#define ELF64_HEADER_SIZE 64
 /*
  * This structure is used to hold the arguments that are
  * used when loading binaries.
  */
 struct linux_binprm {
-        char buf[BPRM_BUF_SIZE] __attribute__((aligned));
-        abi_ulong p;
-        int fd;
-        int e_uid, e_gid;
-        int argc, envc;
-        char **argv;
-        char **envp;
-        char * filename;        /* Name of binary */
-        int (*core_dump)(int, const CPUArchState *); /* coredump routine */
+    char buf[BPRM_BUF_SIZE] __attribute__((aligned));
+    char exec_hdr[ELF64_HEADER_SIZE];
+    char exec_fd;
+    char* exec_filename;
+    ImageSource src;
+    abi_ulong p;
+    int e_uid, e_gid;
+    int argc, envc;
+    char **argv;
+    char **envp;
+    char *filename;        /* Name of binary */
+    int (*core_dump)(int, const CPUArchState *); /* coredump routine */
 };
 
 typedef struct IOCTLEntry IOCTLEntry;
@@ -410,6 +460,8 @@ void print_syscall(void *cpu_env, int num,
 void print_syscall_ret(void *cpu_env, int num, abi_long ret,
                        abi_long arg1, abi_long arg2, abi_long arg3,
                        abi_long arg4, abi_long arg5, abi_long arg6);
+void print_syscall_error(void *cpu_env, int num, abi_long ret);
+
 /**
  * print_taken_signal:
  * @target_signum: target signal being taken
@@ -470,19 +522,30 @@ void sparc64_get_context(CPUSPARCState *env);
 /* mmap.c */
 int target_mprotect(abi_ulong start, abi_ulong len, int prot);
 abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
-                     int flags, int fd, abi_ulong offset);
-int target_munmap(abi_ulong start, abi_ulong len);
+                     int flags, int fd, uint64_t offset, int rlimit_as_account);
+int target_munmap(abi_ulong start, abi_ulong len, int rlimit_as_account);
 abi_long target_mremap(abi_ulong old_addr, abi_ulong old_size,
                        abi_ulong new_size, unsigned long flags,
-                       abi_ulong new_addr);
+                       abi_ulong new_addr, int rlimit_as_account);
+int target_msync(abi_ulong start, abi_ulong len, int flags);
 extern unsigned long last_brk;
 extern abi_ulong mmap_next_start;
 abi_ulong mmap_find_vma(abi_ulong, abi_ulong, abi_ulong);
 void mmap_fork_start(void);
 void mmap_fork_end(int child);
+void sigact_fork_start(void);
+void sigact_fork_end(int child);
+#ifdef TARGET_X86_64
+#define X86_64_MAP_32BIT       0x40
+abi_ulong mmap_find_vma_2g(abi_ulong, abi_ulong, abi_ulong);
+#endif
 
 /* main.c */
-extern unsigned long guest_stack_size;
+extern unsigned long real_guest_stack_size;
+extern unsigned long vir_guest_stack_size;
+extern unsigned long vir_rlimit_as;
+extern unsigned long vir_rlimit_as_old;
+extern unsigned long vir_rlimit_as_acc;
 
 /* user access */
 
@@ -496,7 +559,7 @@ static inline bool access_ok_untagged(int type, abi_ulong addr, abi_ulong size)
         : !guest_range_valid_untagged(addr, size)) {
         return false;
     }
-    return page_check_range((target_ulong)addr, size, type) == 0;
+    return page_check_range((target_ulong)addr, size, type);
 }
 
 static inline bool access_ok(CPUState *cpu, int type,
@@ -652,6 +715,8 @@ static inline void unlock_user(void *host_ptr, abi_ulong guest_addr,
 #else
 void unlock_user(void *host_ptr, abi_ulong guest_addr, ssize_t len);
 #endif
+void *lock_user_remap(int type, abi_ulong guest_addr, ssize_t len, bool copy);
+void unlock_user_remap(void *host_ptr, abi_ulong guest_addr, ssize_t len);
 
 /* Return the length of a string in target memory or -TARGET_EFAULT if
    access error. */

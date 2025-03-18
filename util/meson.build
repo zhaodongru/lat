@@ -4,12 +4,10 @@ util_ss.add(when: 'CONFIG_ATOMIC64', if_false: files('atomic64.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('aio-posix.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('fdmon-poll.c'))
 util_ss.add(when: 'CONFIG_EPOLL_CREATE1', if_true: files('fdmon-epoll.c'))
-util_ss.add(when: ['CONFIG_LINUX_IO_URING', linux_io_uring], if_true: files('fdmon-io_uring.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('compatfd.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('event_notifier-posix.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('mmap-alloc.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('oslib-posix.c'))
-util_ss.add(when: 'CONFIG_POSIX', if_true: [files('qemu-openpty.c'), util])
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('qemu-thread-posix.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('memfd.c'))
 util_ss.add(when: 'CONFIG_WIN32', if_true: files('aio-win32.c'))
@@ -45,42 +43,5 @@ util_ss.add(files('transactions.c'))
 util_ss.add(when: 'CONFIG_POSIX', if_true: files('drm.c'))
 util_ss.add(files('guest-random.c'))
 util_ss.add(files('yank.c'))
-
-if have_user
-  util_ss.add(files('selfmap.c'))
-endif
-
-if have_system
-  util_ss.add(files('crc-ccitt.c'))
-  util_ss.add(when: 'CONFIG_GIO', if_true: [files('dbus.c'), gio])
-  util_ss.add(when: 'CONFIG_LINUX', if_true: files('userfaultfd.c'))
-endif
-
-if have_block
-  util_ss.add(files('aiocb.c', 'async.c', 'aio-wait.c'))
-  util_ss.add(files('base64.c'))
-  util_ss.add(files('buffer.c'))
-  util_ss.add(files('bufferiszero.c'))
-  util_ss.add(files('coroutine-@0@.c'.format(config_host['CONFIG_COROUTINE_BACKEND'])))
-  util_ss.add(files('hbitmap.c'))
-  util_ss.add(files('hexdump.c'))
-  util_ss.add(files('iova-tree.c'))
-  util_ss.add(files('iov.c', 'qemu-sockets.c', 'uri.c'))
-  util_ss.add(files('lockcnt.c'))
-  util_ss.add(files('main-loop.c'))
-  util_ss.add(files('nvdimm-utils.c'))
-  util_ss.add(files('qemu-coroutine.c', 'qemu-coroutine-lock.c', 'qemu-coroutine-io.c'))
-  util_ss.add(when: 'CONFIG_LINUX', if_true: [
-    files('vhost-user-server.c'), vhost_user
-  ])
-  util_ss.add(files('block-helpers.c'))
-  util_ss.add(files('qemu-coroutine-sleep.c'))
-  util_ss.add(files('qemu-co-shared-resource.c'))
-  util_ss.add(files('thread-pool.c', 'qemu-timer.c'))
-  util_ss.add(files('readline.c'))
-  util_ss.add(files('throttle.c'))
-  util_ss.add(files('timed-average.c'))
-  util_ss.add(when: 'CONFIG_INOTIFY1', if_true: files('filemonitor-inotify.c'),
-                                        if_false: files('filemonitor-stub.c'))
-  util_ss.add(when: 'CONFIG_LINUX', if_true: files('vfio-helpers.c'))
-endif
+util_ss.add(files('interval-tree.c'))
+util_ss.add(files('selfmap.c'))

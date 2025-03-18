@@ -745,7 +745,7 @@ bool device_is_in_reset(DeviceState *dev);
 bool bus_is_in_reset(BusState *bus);
 
 /* This should go away once we get rid of the NULL bus hack */
-BusState *sysbus_get_default(void);
+//BusState *sysbus_get_default(void);
 
 char *qdev_get_fw_dev_path(DeviceState *dev);
 char *qdev_get_own_fw_dev_path_from_handler(BusState *bus, DeviceState *dev);
@@ -795,7 +795,12 @@ void qbus_set_bus_hotplug_handler(BusState *bus);
 
 static inline bool qbus_is_hotpluggable(BusState *bus)
 {
+    /* TODO: why? */
+#ifdef CONFIG_LATX
+   return bus->hotplug_handler != 0;
+#else
    return bus->hotplug_handler;
+#endif
 }
 
 void device_listener_register(DeviceListener *listener);

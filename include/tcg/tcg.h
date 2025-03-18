@@ -275,8 +275,13 @@ typedef struct TCGPool {
 
 #define TCG_POOL_CHUNK_SIZE 32768
 
+#ifdef CONFIG_LATX
+#define TCG_MAX_TEMPS 255
+#define TCG_MAX_INSNS 255
+#else
 #define TCG_MAX_TEMPS 512
 #define TCG_MAX_INSNS 512
+#endif
 
 /* when the size of the arguments of a called function is smaller than
    this value, they are statically allocated in the TB stack frame */
@@ -587,6 +592,26 @@ typedef struct TCGProfile {
     int64_t restore_count;
     int64_t restore_time;
     int64_t table_op_count[NB_OPS];
+#ifdef CONFIG_LATX_PROFILER
+    /* shadow page access profiling */
+    int64_t acc_spage_count;
+    int64_t acc_spage_pnone_count;
+    /* translate time profile */
+    int64_t tr_disasm_time;
+    int64_t tr_trans_time;
+    int64_t tr_asm_time;
+    int64_t trans_init_time;
+    int64_t trans_fini_time;
+    /* tb find profile */
+    int64_t hash_count;
+    int64_t qht_count;
+    /* flag rdtn profile */
+    int64_t flag_rdtn_search;
+    int64_t flag_rdtn_pass1;
+    int64_t flag_rdtn_pass2;
+    int64_t flag_rdtn_times;
+    int64_t flag_rdtn_stimes;
+#endif
 } TCGProfile;
 
 struct TCGContext {
@@ -631,6 +656,10 @@ struct TCGContext {
     size_t code_gen_buffer_size;
     void *code_gen_ptr;
     void *data_gen_ptr;
+
+    void *tb_gen_buffer;
+    void *tb_gen_ptr;
+    void *tb_gen_highwater;
 
     /* Threshold to flush the translated code buffer.  */
     void *code_gen_highwater;
@@ -873,6 +902,7 @@ static inline bool tcg_op_buf_full(void)
 void *tcg_malloc_internal(TCGContext *s, int size);
 void tcg_pool_reset(TCGContext *s);
 TranslationBlock *tcg_tb_alloc(TCGContext *s);
+TranslationBlock *tcg_tb_alloc_full(TCGContext *s);
 
 void tcg_region_init(void);
 void tb_destroy(TranslationBlock *tb);
@@ -1298,6 +1328,10 @@ static inline unsigned get_mmuidx(TCGMemOpIdx oi)
 
 #ifdef CONFIG_TCG_INTERPRETER
 uintptr_t tcg_qemu_tb_exec(CPUArchState *env, const void *tb_ptr);
+#elif defined CONFIG_LATX
+#include "latx-config.h"
+#define tcg_qemu_tb_exec(env, tb_ptr) \
+    ((uintptr_t (*)(const void *, void *))context_switch_bt_to_native)(tb_ptr, env)
 #else
 typedef uintptr_t tcg_prologue_fn(CPUArchState *env, const void *tb_ptr);
 extern tcg_prologue_fn *tcg_qemu_tb_exec;

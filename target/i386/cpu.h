@@ -22,7 +22,6 @@
 
 #include "sysemu/tcg.h"
 #include "cpu-qom.h"
-#include "kvm/hyperv-proto.h"
 #include "exec/cpu-defs.h"
 #include "qapi/qapi-types-common.h"
 
@@ -167,6 +166,8 @@ typedef enum X86Seg {
 #define HF_IOBPT_SHIFT      24 /* an io breakpoint enabled */
 #define HF_MPX_EN_SHIFT     25 /* MPX Enabled (CR4+XCR0+BNDCFGx) */
 #define HF_MPX_IU_SHIFT     26 /* BND registers in-use */
+#define HF_UMIP_SHIFT       27 /* CR4.UMIP */
+#define HF_AVX_EN_SHIFT     28 /* AVX Enabled (CR4+XCR0) */
 
 #define HF_CPL_MASK          (3 << HF_CPL_SHIFT)
 #define HF_INHIBIT_IRQ_MASK  (1 << HF_INHIBIT_IRQ_SHIFT)
@@ -192,6 +193,8 @@ typedef enum X86Seg {
 #define HF_IOBPT_MASK        (1 << HF_IOBPT_SHIFT)
 #define HF_MPX_EN_MASK       (1 << HF_MPX_EN_SHIFT)
 #define HF_MPX_IU_MASK       (1 << HF_MPX_IU_SHIFT)
+#define HF_UMIP_MASK         (1 << HF_UMIP_SHIFT)
+#define HF_AVX_EN_MASK       (1 << HF_AVX_EN_SHIFT)
 
 /* hflags2 */
 
@@ -1138,6 +1141,7 @@ typedef struct SegmentCache {
         uint16_t _w_##n[(bits)/16]; \
         uint32_t _l_##n[(bits)/32]; \
         uint64_t _q_##n[(bits)/64]; \
+        float16  _h_##n[(bits)/16]; \
         float32  _s_##n[(bits)/32]; \
         float64  _d_##n[(bits)/64]; \
     }
@@ -1177,6 +1181,7 @@ typedef struct BNDCSReg {
 #define ZMM_B(n) _b_ZMMReg[63 - (n)]
 #define ZMM_W(n) _w_ZMMReg[31 - (n)]
 #define ZMM_L(n) _l_ZMMReg[15 - (n)]
+#define ZMM_H(n) _h_ZMMReg[31 - (n)]
 #define ZMM_S(n) _s_ZMMReg[15 - (n)]
 #define ZMM_Q(n) _q_ZMMReg[7 - (n)]
 #define ZMM_D(n) _d_ZMMReg[7 - (n)]
@@ -1189,6 +1194,7 @@ typedef struct BNDCSReg {
 #define ZMM_B(n) _b_ZMMReg[n]
 #define ZMM_W(n) _w_ZMMReg[n]
 #define ZMM_L(n) _l_ZMMReg[n]
+#define ZMM_H(n) _h_ZMMReg[n]
 #define ZMM_S(n) _s_ZMMReg[n]
 #define ZMM_Q(n) _q_ZMMReg[n]
 #define ZMM_D(n) _d_ZMMReg[n]
@@ -1397,8 +1403,29 @@ typedef struct HVFX86LazyFlags {
 } HVFX86LazyFlags;
 
 typedef struct CPUX86State {
+#ifdef CONFIG_LATX
+    void*  checksum_fail_tb;
+    void *ibtc_table_p;
+    uint64_t vregs[5];
+    /* for debug,can be removed later */
+    uint64_t mips_regs[32];
+    int fcsr;
+    /* TODO: why? in new qemu has no next_eip member */
+    target_ulong exception_next_eip;
+    void *tb_jmp_cache_ptr; /* struct TranslationBlock ** */
+ #ifdef CONFIG_LATX_DEBUG
+    uint64_t last_store_insn;
+    uint64_t tb_exec_count;
+#define FUNC_DEPTH 20
+    char **call_func;
+    int func_index;
+    int last_func_index;
+ #endif
+    bool mode_fpu;
+    bool fpu_clobber;
+#endif
     /* standard registers */
-    target_ulong regs[CPU_NB_REGS];
+    uint64_t regs[CPU_NB_REGS];
     target_ulong eip;
     target_ulong eflags; /* eflags register. During CPU emulation, CC
                         flags and DF are set to zero because they are
@@ -1442,7 +1469,9 @@ typedef struct CPUX86State {
     uint16_t fpop;
     uint64_t fpip;
     uint64_t fpdp;
-
+    /* TODO imm_cached_value size should correspond
+        to IMM_CACHE_CAPACITY */
+    int64_t imm_cached_value[4];
     /* emulator internal variables */
     float_status fp_status;
     floatx80 ft0;
@@ -1516,36 +1545,12 @@ typedef struct CPUX86State {
     uint64_t pv_eoi_en_msr;
     uint64_t poll_control_msr;
 
-    /* Partition-wide HV MSRs, will be updated only on the first vcpu */
-    uint64_t msr_hv_hypercall;
-    uint64_t msr_hv_guest_os_id;
-    uint64_t msr_hv_tsc;
-
-    /* Per-VCPU HV MSRs */
-    uint64_t msr_hv_vapic;
-    uint64_t msr_hv_crash_params[HV_CRASH_PARAMS];
-    uint64_t msr_hv_runtime;
-    uint64_t msr_hv_synic_control;
-    uint64_t msr_hv_synic_evt_page;
-    uint64_t msr_hv_synic_msg_page;
-    uint64_t msr_hv_synic_sint[HV_SINT_COUNT];
-    uint64_t msr_hv_stimer_config[HV_STIMER_COUNT];
-    uint64_t msr_hv_stimer_count[HV_STIMER_COUNT];
-    uint64_t msr_hv_reenlightenment_control;
-    uint64_t msr_hv_tsc_emulation_control;
-    uint64_t msr_hv_tsc_emulation_status;
-
-    uint64_t msr_rtit_ctrl;
-    uint64_t msr_rtit_status;
-    uint64_t msr_rtit_output_base;
-    uint64_t msr_rtit_output_mask;
-    uint64_t msr_rtit_cr3_match;
-    uint64_t msr_rtit_addrs[MAX_RTIT_ADDRS];
-
     /* exception/interrupt handling */
     int error_code;
     int exception_is_int;
+#ifndef CONFIG_LATX
     target_ulong exception_next_eip;
+#endif
     target_ulong dr[8]; /* debug registers; note dr4 and dr5 are unused */
     union {
         struct CPUBreakpoint *cpu_breakpoint[4];
@@ -1650,6 +1655,10 @@ typedef struct CPUX86State {
     TPRAccess tpr_access_type;
 
     unsigned nr_dies;
+#ifdef CONFIG_LATX
+    ucontext_t *puc;
+    uintptr_t insn_save[2];
+#endif
 } CPUX86State;
 
 struct kvm_msrs;
@@ -1918,6 +1927,8 @@ void cpu_x86_fsave(CPUX86State *s, target_ulong ptr, int data32);
 void cpu_x86_frstor(CPUX86State *s, target_ulong ptr, int data32);
 void cpu_x86_fxsave(CPUX86State *s, target_ulong ptr);
 void cpu_x86_fxrstor(CPUX86State *s, target_ulong ptr);
+void cpu_x86_xsave(CPUX86State *s, target_ulong ptr);
+void cpu_x86_xrstor(CPUX86State *s, target_ulong ptr);
 
 /* you can call this signal handler from your SIGBUS and SIGSEGV
    signal handlers to inform the virtual CPU of exceptions. non zero
@@ -1936,6 +1947,7 @@ void host_vendor_fms(char *vendor, int *family, int *model, int *stepping);
 
 /* helper.c */
 void x86_cpu_set_a20(X86CPU *cpu, int a20_state);
+void cpu_sync_avx_hflag(CPUX86State *env);
 
 #ifndef CONFIG_USER_ONLY
 static inline int x86_asidx_from_attrs(CPUState *cs, MemTxAttrs attrs)
@@ -2181,6 +2193,7 @@ bool cpu_is_bsp(X86CPU *cpu);
 
 void x86_cpu_xrstor_all_areas(X86CPU *cpu, const X86XSaveArea *buf);
 void x86_cpu_xsave_all_areas(X86CPU *cpu, X86XSaveArea *buf);
+uint32_t xsave_area_size(uint64_t mask);
 void x86_update_hflags(CPUX86State* env);
 
 static inline bool hyperv_feat_enabled(X86CPU *cpu, int feat)

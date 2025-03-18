@@ -29,6 +29,16 @@ static inline bool qemu_loglevel_mask(int mask)
     return (qemu_loglevel & mask) != 0;
 }
 
+static inline void qemu_loglevel_set(int mask)
+{
+    qemu_loglevel |= mask;
+}
+
+static inline void qemu_loglevel_clean(int mask)
+{
+    qemu_loglevel &= ~mask;
+}
+
 /* main logging function */
 int GCC_FMT_ATTR(1, 2) qemu_log(const char *fmt, ...);
 

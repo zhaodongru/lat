@@ -109,7 +109,7 @@ static bool bus_check_address(BusState *bus, DeviceState *child, Error **errp)
 bool qdev_set_parent_bus(DeviceState *dev, BusState *bus, Error **errp)
 {
     BusState *old_parent_bus = dev->parent_bus;
-    DeviceClass *dc = DEVICE_GET_CLASS(dev);
+    DeviceClass *dc __attribute__((unused)) = DEVICE_GET_CLASS(dev);
 
     assert(dc->bus_type && object_dynamic_cast(OBJECT(bus), dc->bus_type));
 
@@ -191,19 +191,19 @@ enum ListenerDirection { Forward, Reverse };
         }                                                         \
     } while (0)
 
-static int device_listener_add(DeviceState *dev, void *opaque)
-{
-    DEVICE_LISTENER_CALL(realize, Forward, dev);
-
-    return 0;
-}
+//static int device_listener_add(DeviceState *dev, void *opaque)
+//{
+//    DEVICE_LISTENER_CALL(realize, Forward, dev);
+//
+//    return 0;
+//}
 
 void device_listener_register(DeviceListener *listener)
 {
     QTAILQ_INSERT_TAIL(&device_listeners, listener, link);
 
-    qbus_walk_children(sysbus_get_default(), NULL, NULL, device_listener_add,
-                       NULL, NULL);
+    //qbus_walk_children(sysbus_get_default(), NULL, NULL, device_listener_add,
+    //                   NULL, NULL);
 }
 
 void device_listener_unregister(DeviceListener *listener)
@@ -406,7 +406,7 @@ void qdev_unrealize(DeviceState *dev)
 static int qdev_assert_realized_properly_cb(Object *obj, void *opaque)
 {
     DeviceState *dev = DEVICE(object_dynamic_cast(obj, TYPE_DEVICE));
-    DeviceClass *dc;
+    DeviceClass *dc __attribute__((unused));
 
     if (dev) {
         dc = DEVICE_GET_CLASS(dev);
@@ -950,7 +950,7 @@ static void device_finalize(Object *obj)
     if (dev->pending_deleted_event) {
         g_assert(dev->canonical_path);
 
-        qapi_event_send_device_deleted(!!dev->id, dev->id, dev->canonical_path);
+        //qapi_event_send_device_deleted(!!dev->id, dev->id, dev->canonical_path);
         g_free(dev->canonical_path);
         dev->canonical_path = NULL;
     }

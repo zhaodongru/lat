@@ -126,7 +126,7 @@ const VMStateDescription vmstate_cpu_common = {
 
 void cpu_exec_realizefn(CPUState *cpu, Error **errp)
 {
-    CPUClass *cc = CPU_GET_CLASS(cpu);
+    CPUClass *cc __attribute__((unused)) = CPU_GET_CLASS(cpu);
 
     cpu_list_add(cpu);
 
@@ -151,7 +151,7 @@ void cpu_exec_realizefn(CPUState *cpu, Error **errp)
 
 void cpu_exec_unrealizefn(CPUState *cpu)
 {
-    CPUClass *cc = CPU_GET_CLASS(cpu);
+    CPUClass *cc __attribute__((unused)) = CPU_GET_CLASS(cpu);
 
 #ifdef CONFIG_USER_ONLY
     assert(cc->vmsd == NULL);
@@ -216,7 +216,7 @@ const char *parse_cpu_option(const char *cpu_option)
 void tb_invalidate_phys_addr(target_ulong addr)
 {
     mmap_lock();
-    tb_invalidate_phys_page_range(addr, addr + 1);
+    tb_invalidate_phys_page(addr);
     mmap_unlock();
 }
 
@@ -242,7 +242,7 @@ void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr, MemTxAttrs attrs)
         return;
     }
     ram_addr = memory_region_get_ram_addr(mr) + addr;
-    tb_invalidate_phys_page_range(ram_addr, ram_addr + 1);
+    tb_invalidate_phys_page(ram_addr);
 }
 
 static void breakpoint_invalidate(CPUState *cpu, target_ulong pc)
@@ -342,13 +342,13 @@ void cpu_abort(CPUState *cpu, const char *fmt, ...)
 
     va_start(ap, fmt);
     va_copy(ap2, ap);
-    fprintf(stderr, "qemu: fatal: ");
+    fprintf(stderr, "latx: fatal: ");
     vfprintf(stderr, fmt, ap);
     fprintf(stderr, "\n");
     cpu_dump_state(cpu, stderr, CPU_DUMP_FPU | CPU_DUMP_CCOP);
     if (qemu_log_separate()) {
         FILE *logfile = qemu_log_lock();
-        qemu_log("qemu: fatal: ");
+        qemu_log("latx: fatal: ");
         qemu_log_vprintf(fmt, ap2);
         qemu_log("\n");
         log_cpu_state(cpu, CPU_DUMP_FPU | CPU_DUMP_CCOP);

@@ -120,7 +120,7 @@ static bool qobject_output_start_struct(Visitor *v, const char *name,
 static void qobject_output_end_struct(Visitor *v, void **obj)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    QObject *value = qobject_output_pop(qov, obj);
+    QObject *value __attribute__((unused)) = qobject_output_pop(qov, obj);
     assert(qobject_type(value) == QTYPE_QDICT);
 }
 
@@ -145,7 +145,7 @@ static GenericList *qobject_output_next_list(Visitor *v, GenericList *tail,
 static void qobject_output_end_list(Visitor *v, void **obj)
 {
     QObjectOutputVisitor *qov = to_qov(v);
-    QObject *value = qobject_output_pop(qov, obj);
+    QObject *value __attribute__((unused)) = qobject_output_pop(qov, obj);
     assert(qobject_type(value) == QTYPE_QLIST);
 }
 

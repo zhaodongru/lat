@@ -9,13 +9,6 @@ util_ss.add(files(
   'string-input-visitor.c',
   'string-output-visitor.c',
 ))
-if have_system or have_tools
-  util_ss.add(files(
-    'qmp-dispatch.c',
-    'qmp-event.c',
-    'qmp-registry.c',
-  ))
-endif
 
 qapi_all_modules = [
   'authz',
@@ -46,22 +39,6 @@ qapi_all_modules = [
   'transaction',
   'yank',
 ]
-if have_system
-  qapi_all_modules += [
-    'acpi',
-    'audio',
-    'qdev',
-    'pci',
-    'rdma',
-    'rocker',
-    'tpm',
-  ]
-endif
-if have_system or have_tools
-  qapi_all_modules += [
-    'ui',
-  ]
-endif
 
 qapi_storage_daemon_modules = [
   'block-core',
@@ -104,14 +81,6 @@ foreach module : qapi_all_modules
     'qapi-visit-@0@.c'.format(module),
     'qapi-visit-@0@.h'.format(module),
   ]
-  if have_system or have_tools
-    qapi_module_outputs += [
-      'qapi-events-@0@.c'.format(module),
-      'qapi-events-@0@.h'.format(module),
-      'qapi-commands-@0@.c'.format(module),
-      'qapi-commands-@0@.h'.format(module),
-    ]
-  endif
   if module.endswith('-target')
     qapi_specific_outputs += qapi_module_outputs
   else

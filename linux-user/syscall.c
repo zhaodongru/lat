@@ -17,6 +17,7 @@
  *  along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 #define _ATFILE_SOURCE
+#include <linux/types.h>
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
 #include "qemu/path.h"
@@ -116,15 +117,29 @@
 #include <linux/if_alg.h>
 #include <linux/rtc.h>
 #include <sound/asound.h>
+#include <linux/uinput.h>
 #ifdef HAVE_BTRFS_H
 #include <linux/btrfs.h>
 #endif
 #ifdef HAVE_DRM_H
+#if defined(IS_LOONGNIX) || defined(IS_ARCH)
 #include <libdrm/drm.h>
 #include <libdrm/i915_drm.h>
+#include <libdrm/radeon_drm.h>
+#include <libdrm/amdgpu_drm.h>
+#else
+#include <drm/drm.h>
+#include <drm/i915_drm.h>
+#include <drm/radeon_drm.h>
+#include <drm/amdgpu_drm.h>
 #endif
+#endif
+#include <linux/can/raw.h>
+#include <linux/videodev2.h>
+#include <sound/asequencer.h>
 #include "linux_loop.h"
 #include "uname.h"
+#include "ioctl/mpt3sas_ctl.h"
 
 #include "qemu.h"
 #include "qemu/guest-random.h"
@@ -133,10 +148,23 @@
 #include "qapi/error.h"
 #include "fd-trans.h"
 #include "tcg/tcg.h"
+#include <linux/nsfs.h>
+#ifdef CONFIG_LATX
+#define TUNNEL_VIRTUAL_SYSCALL_ID 600
+#include "env.h"
+#include <tunnel_lib.h>
+#include "aot.h"
+#include "latx-options.h"
+#endif
 
+#include <linux/perf_event.h>
+#include <sys/ptrace.h>
 #ifndef CLONE_IO
 #define CLONE_IO                0x80000000      /* Clone io context */
 #endif
+
+#include <linux/netfilter_ipv4.h>
+#include <linux/dma-buf.h>
 
 /* We can't directly call the host clone syscall, because this will
  * badly confuse libc (breaking mutexes, for example). So we must
@@ -284,6 +312,12 @@ static type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5,	\
 
 #define __NR_sys_gettid __NR_gettid
 _syscall0(int, sys_gettid)
+#define __NR_sys_setreuid __NR_setreuid
+_syscall2(int, sys_setreuid, uid_t, ruid, uid_t, euid)
+#define __NR_sys_setregid __NR_setregid
+_syscall2(int, sys_setregid, gid_t, rgid, gid_t, egid)
+#define __NR_sys_setgroups __NR_setgroups
+_syscall2(int, sys_setgroups, size_t, size, gid_t*, list)
 
 /* For the 64-bit guest on 32-bit host case we must emulate
  * getdents using getdents64, because otherwise the host
@@ -295,7 +329,7 @@ _syscall0(int, sys_gettid)
 #define EMULATE_GETDENTS_WITH_GETDENTS
 #endif
 
-#if defined(TARGET_NR_getdents) && defined(EMULATE_GETDENTS_WITH_GETDENTS)
+#if (defined(TARGET_NR_getdents) && defined(EMULATE_GETDENTS_WITH_GETDENTS))
 _syscall3(int, sys_getdents, uint, fd, struct linux_dirent *, dirp, uint, count);
 #endif
 #if (defined(TARGET_NR_getdents) && \
@@ -439,7 +473,8 @@ static int sys_renameat2(int oldfd, const char *old,
 #ifdef CONFIG_INOTIFY
 #include <sys/inotify.h>
 
-#if defined(TARGET_NR_inotify_init) && defined(__NR_inotify_init)
+#if defined(TARGET_NR_inotify_init) && defined(__NR_inotify_init) || \
+defined(__loongarch__)
 static int sys_inotify_init(void)
 {
   return (inotify_init());
@@ -472,6 +507,28 @@ static int sys_inotify_init1(int flags)
 #undef TARGET_NR_inotify_add_watch
 #undef TARGET_NR_inotify_rm_watch
 #endif /* CONFIG_INOTIFY  */
+
+#if defined(CONFIG_INOTIFY)
+#include <sys/fanotify.h>
+#if defined(TARGET_NR_fanotify_init) && defined(__NR_fanotify_init)
+static int sys_fanotify_init(unsigned int flags, unsigned int event_f_flags)
+{
+  return (fanotify_init(flags, event_f_flags));
+}
+#endif
+#if defined(TARGET_NR_fanotify_mark) && defined(__NR_fanotify_mark)
+static int sys_fanotify_mark(int fanotify_fd, unsigned int flags,
+                         uint64_t mask, int dirfd, const char *pathname)
+{
+ return (fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname));
+}
+#endif
+#else
+#undef TARGET_NR_fanotify_init
+#undef __NR_fanotify_init
+#undef TARGET_NR_fanotify_mark
+#undef __NR_fanotify_mark
+#endif
 
 #if defined(TARGET_NR_prlimit64)
 #ifndef __NR_prlimit64
@@ -736,6 +793,10 @@ safe_syscall4(pid_t, wait4, pid_t, pid, int *, status, int, options, \
 safe_syscall5(int, waitid, idtype_t, idtype, id_t, id, siginfo_t *, infop, \
               int, options, struct rusage *, rusage)
 safe_syscall3(int, execve, const char *, filename, char **, argv, char **, envp)
+#ifdef TARGET_NR_execveat
+safe_syscall5(int, execveat, int, fd, const char *, filename, char **, argv, \
+              char **, envp, int, flag)
+#endif
 #if defined(TARGET_NR_select) || defined(TARGET_NR__newselect) || \
     defined(TARGET_NR_pselect6) || defined(TARGET_NR_pselect6_time64)
 safe_syscall6(int, pselect6, int, nfds, fd_set *, readfds, fd_set *, writefds, \
@@ -757,6 +818,9 @@ safe_syscall6(int,futex,int *,uaddr,int,op,int,val, \
 safe_syscall6(int,futex_time64,int *,uaddr,int,op,int,val, \
               const struct timespec *,timeout,int *,uaddr2,int,val3)
 #endif
+#if defined(__NR_pivot_root)
+safe_syscall2(int, pivot_root, const char *, new_root, const char *, put_old)
+#endif
 safe_syscall2(int, rt_sigsuspend, sigset_t *, newset, size_t, sigsetsize)
 safe_syscall2(int, kill, pid_t, pid, int, sig)
 safe_syscall2(int, tkill, int, tid, int, sig)
@@ -767,6 +831,16 @@ safe_syscall5(ssize_t, preadv, int, fd, const struct iovec *, iov, int, iovcnt,
               unsigned long, pos_l, unsigned long, pos_h)
 safe_syscall5(ssize_t, pwritev, int, fd, const struct iovec *, iov, int, iovcnt,
               unsigned long, pos_l, unsigned long, pos_h)
+safe_syscall6(ssize_t, preadv2, int, fd, const struct iovec *, iov, int, iovcnt,
+              unsigned long, pos_l, unsigned long, pos_h, int, flags)
+safe_syscall6(ssize_t, pwritev2, int, fd, const struct iovec *, iov, int, iovcnt,
+              unsigned long, pos_l, unsigned long, pos_h, int, flags)
+safe_syscall6(ssize_t, process_vm_readv, pid_t, pid, const struct iovec *, lvec,
+              unsigned long, liovcnt, const struct iovec *, rvec,
+              unsigned long, riovcnt, unsigned long, flags)
+safe_syscall6(ssize_t, process_vm_writev, pid_t, pid, const struct iovec *, lvec,
+              unsigned long, liovcnt, const struct iovec *, rvec,
+              unsigned long, riovcnt, unsigned long, flags)
 safe_syscall3(int, connect, int, fd, const struct sockaddr *, addr,
               socklen_t, addrlen)
 safe_syscall6(ssize_t, sendto, int, fd, const void *, buf, size_t, len,
@@ -775,6 +849,10 @@ safe_syscall6(ssize_t, recvfrom, int, fd, void *, buf, size_t, len,
               int, flags, struct sockaddr *, addr, socklen_t *, addrlen)
 safe_syscall3(ssize_t, sendmsg, int, fd, const struct msghdr *, msg, int, flags)
 safe_syscall3(ssize_t, recvmsg, int, fd, struct msghdr *, msg, int, flags)
+safe_syscall4(ssize_t, sendmmsg, int, fd, struct msghdr *, msgvec, unsigned int, vlen,
+              int, flags)
+safe_syscall5(ssize_t, recvmmsg, int, fd, struct msghdr *, msgvec, unsigned int, vlen,
+              int, flags, struct timespec *, timeout)
 safe_syscall2(int, flock, int, fd, int, operation)
 #if defined(TARGET_NR_rt_sigtimedwait) || defined(TARGET_NR_rt_sigtimedwait_time64)
 safe_syscall4(int, rt_sigtimedwait, const sigset_t *, these, siginfo_t *, uinfo,
@@ -827,6 +905,10 @@ safe_syscall6(ssize_t, copy_file_range, int, infd, loff_t *, pinoff,
               int, outfd, loff_t *, poutoff, size_t, length,
               unsigned int, flags)
 #endif
+#ifdef __NR_quotactl
+safe_syscall4(int, quotactl, int, cmd, const char *, special,
+              int, id, caddr_t, addr)
+#endif
 
 /* We do ioctl like this rather than via safe_syscall3 to preserve the
  * "third argument might be integer or pointer or not present" behaviour of
@@ -875,6 +957,14 @@ static inline int host_to_target_sock_type(int host_type)
     return target_type;
 }
 
+#define N_SHM_REGIONS	32
+
+static struct shm_region {
+    abi_ulong start;
+    abi_ulong size;
+    bool in_use;
+} shm_regions[N_SHM_REGIONS];
+
 static abi_ulong target_brk;
 static abi_ulong target_original_brk;
 static abi_ulong brk_page;
@@ -893,6 +983,7 @@ abi_long do_brk(abi_ulong new_brk)
 {
     abi_long mapped_addr;
     abi_ulong new_alloc_size;
+    int i;
 
     /* brk pointers are always untagged */
 
@@ -908,6 +999,15 @@ abi_long do_brk(abi_ulong new_brk)
         return target_brk;
     }
 
+    for (i = 0; i < N_SHM_REGIONS; ++i) {
+        if (shm_regions[i].in_use &&
+            shm_regions[i].start <= new_brk &&
+            shm_regions[i].start + shm_regions[i].size >= new_brk) {
+	        return target_brk;
+        }
+    }
+
+
     /* If the new brk is less than the highest page reserved to the
      * target heap allocation, set it and we're almost done...  */
     if (new_brk <= brk_page) {
@@ -916,9 +1016,9 @@ abi_long do_brk(abi_ulong new_brk)
         if (new_brk > target_brk) {
             memset(g2h_untagged(target_brk), 0, new_brk - target_brk);
         }
-	target_brk = new_brk;
+	    target_brk = new_brk;
         DEBUGF_BRK(TARGET_ABI_FMT_lx " (new_brk <= brk_page)\n", target_brk);
-	return target_brk;
+	    return target_brk;
     }
 
     /* We need to allocate more memory after the brk... Note that
@@ -930,7 +1030,7 @@ abi_long do_brk(abi_ulong new_brk)
     new_alloc_size = HOST_PAGE_ALIGN(new_brk - brk_page);
     mapped_addr = get_errno(target_mmap(brk_page, new_alloc_size,
                                         PROT_READ|PROT_WRITE,
-                                        MAP_ANON|MAP_PRIVATE, 0, 0));
+                                        MAP_ANON|MAP_PRIVATE, 0, 0, 1));
 
     if (mapped_addr == brk_page) {
         /* Heap contents are initialized to zero, as for anonymous
@@ -951,7 +1051,7 @@ abi_long do_brk(abi_ulong new_brk)
         /* Mapped but at wrong address, meaning there wasn't actually
          * enough space for this brk.
          */
-        target_munmap(mapped_addr, new_alloc_size);
+        target_munmap(mapped_addr, new_alloc_size, 1);
         mapped_addr = -1;
         DEBUGF_BRK(TARGET_ABI_FMT_lx " (mapped_addr != -1)\n", target_brk);
     }
@@ -1097,7 +1197,7 @@ static inline rlim_t target_to_host_rlim(abi_ulong target_rlim)
 {
     abi_ulong target_rlim_swap;
     rlim_t result;
-    
+
     target_rlim_swap = tswapal(target_rlim);
     if (target_rlim_swap == TARGET_RLIM_INFINITY)
         return RLIM_INFINITY;
@@ -1105,7 +1205,7 @@ static inline rlim_t target_to_host_rlim(abi_ulong target_rlim)
     result = target_rlim_swap;
     if (target_rlim_swap != (rlim_t)result)
         return RLIM_INFINITY;
-    
+
     return result;
 }
 #endif
@@ -1115,13 +1215,13 @@ static inline abi_ulong host_to_target_rlim(rlim_t rlim)
 {
     abi_ulong target_rlim_swap;
     abi_ulong result;
-    
+
     if (rlim == RLIM_INFINITY || rlim != (abi_long)rlim)
         target_rlim_swap = TARGET_RLIM_INFINITY;
     else
         target_rlim_swap = rlim;
     result = tswapal(target_rlim_swap);
-    
+
     return result;
 }
 #endif
@@ -1598,6 +1698,133 @@ static abi_long do_pselect6(abi_long arg1, abi_long arg2, abi_long arg3,
 }
 #endif
 
+#if TARGET_ABI_BITS == 32 && HOST_LONG_BITS == 64
+safe_syscall2(int, io_setup, abi_ulong, arg1, uint64_t*, arg2)
+safe_syscall3(int, io_submit, uint64_t, arg1,
+    abi_ulong, arg2, abi_ulong * *, arg3)
+safe_syscall3(int, io_cancel, uint64_t, arg1,
+    abi_ulong, arg2, abi_ulong, arg3)
+safe_syscall5(int, io_getevents, uint64_t, arg1, abi_ulong,
+    arg2, abi_ulong, arg3, abi_ulong, arg4, abi_ulong, arg5)
+safe_syscall1(int, io_destroy, uint64_t, arg1)
+struct pmap {
+    uint64_t ctx;
+};
+typedef struct Link {
+    int elem;
+    struct pmap *body;/*data body*/
+    struct Link *next;/*next*/
+} aio_link;
+aio_link link_aio = {0};
+static abi_ulong insertElem(aio_link *p, struct pmap* newp)
+{
+    aio_link *t = p;
+    aio_link *tmp;
+#define AIO_ELEM_MAXLENGTH 1024
+    for (int i = 0; i < AIO_ELEM_MAXLENGTH; t = t->next, i++) {
+        if (!t->next) {
+            tmp = (aio_link *)calloc(1, sizeof(aio_link));
+            tmp->body = newp;
+            tmp->elem = t->elem + 1;
+            t->next = tmp;
+            return tmp->elem;
+        }
+    }
+    fprintf(stderr, "aio elem is too large!\n");
+    return -1;
+}
+static struct pmap *selectElem(aio_link * p, int elem)
+{
+    aio_link *t = p;
+    int i;
+    for (i = 0; i < AIO_ELEM_MAXLENGTH; i++, t = t->next) {
+        if (t->elem == elem) {
+            return t->body;
+         }
+        if (!t->next) {
+            return NULL;
+        }
+    }
+    if (i >= AIO_ELEM_MAXLENGTH) {
+        fprintf(stderr, "aio elem is too large!\n");
+    }
+    return NULL;
+}
+static int delElem(aio_link *p, int elem)
+{
+    aio_link *temp = p, *last = NULL;
+    int i;
+    for (i = 0; i < AIO_ELEM_MAXLENGTH; i++) {
+        if (temp->elem == elem) {
+            break;
+        }
+        if (temp->next == NULL) {
+            return -1;
+        }
+        last = temp;
+        temp = temp->next;
+    }
+    if (i >= AIO_ELEM_MAXLENGTH) {
+        fprintf(stderr, "aio elem is too large!\n");
+    }
+    aio_link *del = temp;
+    if (del == p) {
+        return -1;
+    } else if (del->next) {
+        last->next = del->next;
+    } else {
+        last->next = NULL;
+    }
+    free(del->body);
+    free(del);
+    return 0;
+}
+static abi_ulong do_io_setup(abi_ulong arg1, abi_ulong arg2)
+{
+    abi_ulong *target_ctx = (abi_ulong *)((void*)((uintptr_t)arg2));
+    uint64_t ctx = 0;
+    abi_ulong ret;
+    struct pmap *tmpmap = calloc(1, sizeof(struct pmap));
+
+    ret = get_errno(safe_io_setup(arg1, &ctx));
+    tmpmap->ctx = ctx;
+    *target_ctx = insertElem(&link_aio, tmpmap);
+    return ret;
+}
+static abi_ulong do_io_submit(abi_long arg1, abi_long arg2,
+    abi_long arg3)
+{
+    abi_ulong *tcb = (abi_ulong *)(
+        (intptr_t)(*((abi_ulong **)(intptr_t)(arg3 & 0xFFFFFFFF))) &
+            0xFFFFFFFF);/*On x86, both address of*/
+                        /* adress and address should be 32bit.*/
+    struct pmap *mm = NULL;
+    mm = selectElem(&link_aio, arg1);
+    return get_errno(safe_io_submit(mm->ctx, arg2, &tcb));
+}
+static abi_ulong do_io_cancel(abi_ulong arg1, abi_ulong arg2, abi_ulong arg3)
+{
+    struct pmap *mm = NULL;
+        mm = selectElem(&link_aio, arg1);
+    return get_errno(safe_io_cancel(mm->ctx, arg2, arg3));
+}
+static abi_long do_io_getevents(abi_long arg1, abi_long arg2,
+    abi_long arg3, abi_long arg4, abi_long arg5)
+{
+    struct pmap *mm = NULL;
+        mm = selectElem(&link_aio, arg1);
+    return get_errno(safe_io_getevents(mm->ctx, arg2, arg3, arg4, arg5));
+}
+static abi_long do_io_destroy(abi_long arg1)
+{
+    struct pmap *mm = NULL;
+    abi_long ret;
+    mm = selectElem(&link_aio, arg1);
+    ret = get_errno(safe_io_destroy(mm->ctx));
+    delElem(&link_aio, arg1);
+    return ret;
+}
+#endif
 #if defined(TARGET_NR_poll) || defined(TARGET_NR_ppoll) || \
     defined(TARGET_NR_ppoll_time64)
 static abi_long do_ppoll(abi_long arg1, abi_long arg2, abi_long arg3,
@@ -1629,7 +1856,7 @@ static abi_long do_ppoll(abi_long arg1, abi_long arg2, abi_long arg3,
     }
     if (ppoll) {
         struct timespec _timeout_ts, *timeout_ts = &_timeout_ts;
-        target_sigset_t *target_set;
+        target_sigset_t *target_set = NULL;
         sigset_t _set, *set = &_set;
 
         if (arg3) {
@@ -1873,9 +2100,9 @@ static inline abi_long target_to_host_cmsg(struct msghdr *msgh,
     abi_ulong target_cmsg_addr;
     struct target_cmsghdr *target_cmsg, *target_cmsg_start;
     socklen_t space = 0;
-    
+
     msg_controllen = tswapal(target_msgh->msg_controllen);
-    if (msg_controllen < sizeof (struct target_cmsghdr)) 
+    if (msg_controllen < sizeof (struct target_cmsghdr))
         goto the_end;
     target_cmsg_addr = tswapal(target_msgh->msg_control);
     target_cmsg = lock_user(VERIFY_READ, target_cmsg_addr, msg_controllen, 1);
@@ -1961,8 +2188,12 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
     socklen_t space = 0;
 
     msg_controllen = tswapal(target_msgh->msg_controllen);
-    if (msg_controllen < sizeof (struct target_cmsghdr)) 
+    if (msg_controllen < sizeof (struct target_cmsghdr)) {
+        if (cmsg && cmsg->cmsg_len) {
+            target_msgh->msg_flags |= tswap32(MSG_CTRUNC);
+        }
         goto the_end;
+    }
     target_cmsg_addr = tswapal(target_msgh->msg_control);
     target_cmsg = lock_user(VERIFY_WRITE, target_cmsg_addr, msg_controllen, 0);
     target_cmsg_start = target_cmsg;
@@ -2176,10 +2407,16 @@ static inline abi_long host_to_target_cmsg(struct target_msghdr *target_msgh,
         cmsg = CMSG_NXTHDR(msgh, cmsg);
         target_cmsg = TARGET_CMSG_NXTHDR(target_msgh, target_cmsg,
                                          target_cmsg_start);
+        if (cmsg && !target_cmsg)
+            target_msgh->msg_flags |= tswap32(MSG_CTRUNC);
     }
-    unlock_user(target_cmsg, target_cmsg_addr, space);
+    unlock_user(target_cmsg_start, target_cmsg_addr, space);
  the_end:
     target_msgh->msg_controllen = tswapal(space);
+    if (target_msgh->msg_flags & tswap32(MSG_CTRUNC)) {
+        qemu_log_mask(LAT_LOG_SYSCALL,
+                "[LATX_SYSCALL] cmsg with MSG_CTRUNC but dropped by LATX\n");
+    }
     return 0;
 }
 
@@ -2191,6 +2428,8 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
     int val;
     struct ip_mreqn *ip_mreq;
     struct ip_mreq_source *ip_mreq_source;
+    struct group_req *group_req;
+    struct tpacket_req *req;
 
     switch(level) {
     case SOL_TCP:
@@ -2216,9 +2455,12 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
         case IP_RECVERR:
         case IP_RECVTTL:
         case IP_RECVTOS:
+        case IP_OPTIONS:
+        case IP_UNICAST_IF:
 #ifdef IP_FREEBIND
         case IP_FREEBIND:
 #endif
+        case IP_MULTICAST_IF:
         case IP_MULTICAST_TTL:
         case IP_MULTICAST_LOOP:
             val = 0;
@@ -2253,6 +2495,15 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
             ret = get_errno(setsockopt(sockfd, level, optname, ip_mreq_source, optlen));
             unlock_user (ip_mreq_source, optval_addr, 0);
             break;
+        case MCAST_JOIN_GROUP:
+        case MCAST_LEAVE_GROUP:
+            if (optlen < sizeof (struct group_req))
+                return -TARGET_EINVAL;
+
+            group_req = lock_user(VERIFY_READ, optval_addr, optlen, 1);
+            ret = get_errno(setsockopt(sockfd, level, optname, group_req, optlen));
+            unlock_user (group_req, optval_addr, 0);
+            break;
 
         default:
             goto unimplemented;
@@ -2282,6 +2533,8 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
         case IPV6_2292DSTOPTS:
         case IPV6_TCLASS:
         case IPV6_ADDR_PREFERENCES:
+        case IPV6_DONTFRAG:
+        case IPV6_HOPLIMIT:
 #ifdef IPV6_RECVPATHMTU
         case IPV6_RECVPATHMTU:
 #endif
@@ -2294,6 +2547,8 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
 #ifdef IPV6_RECVORIGDSTADDR
         case IPV6_RECVORIGDSTADDR:
 #endif
+        case IPV6_UNICAST_IF:
+        case IPV6_MULTICAST_IF:
             val = 0;
             if (optlen < sizeof(uint32_t)) {
                 return -TARGET_EINVAL;
@@ -2387,6 +2642,25 @@ static abi_long do_setsockopt(int sockfd, int level, int optname,
                                        &val, sizeof(val)));
             break;
 
+        default:
+            goto unimplemented;
+        }
+        break;
+    case SOL_PACKET:
+        switch(optname) {
+        case PACKET_RX_RING:
+        case PACKET_TX_RING:
+            req = lock_user(VERIFY_READ, optval_addr, optlen, 1);
+            ret = get_errno(setsockopt(sockfd, level, optname, req, optlen));
+            unlock_user (req, optval_addr, 0);
+            break;
+        case PACKET_VERSION:
+            if (optlen != sizeof(val))
+                return -TARGET_EINVAL;
+            if (get_user_u32(val, optval_addr))
+                return -TARGET_EFAULT;
+            ret = get_errno(setsockopt(sockfd, level, optname, &val, optlen));
+            break;
         default:
             goto unimplemented;
         }
@@ -2634,6 +2908,17 @@ set_timeout:
                                    sizeof(val)));
         break;
 #endif /* SOL_NETLINK */
+    case SOL_CAN_RAW:
+    {
+        char * can_raw_val;
+        can_raw_val = lock_user(VERIFY_READ, optval_addr, optlen, 1);
+		if (!can_raw_val) {
+		    return -TARGET_EFAULT;
+		}
+        ret = get_errno(setsockopt(sockfd, SOL_CAN_RAW, optname, can_raw_val, optlen));
+        unlock_user(can_raw_val, optval_addr, 0);
+        break;
+    }
     default:
     unimplemented:
         qemu_log_mask(LOG_UNIMP, "Unsupported setsockopt level=%d optname=%d\n",
@@ -2869,6 +3154,9 @@ get_timeout:
         if (len == 4) {
             if (put_user_u32(val, optval_addr))
                 return -TARGET_EFAULT;
+        } else if (len == 2) {
+            if (put_user_u16(val, optval_addr))
+                return -TARGET_EFAULT;
         } else {
             if (put_user_u8(val, optval_addr))
                 return -TARGET_EFAULT;
@@ -2887,10 +3175,14 @@ get_timeout:
         case IP_PKTINFO:
         case IP_MTU_DISCOVER:
         case IP_RECVERR:
+        case IP_RECVTTL:
         case IP_RECVTOS:
+        case IP_OPTIONS:
+        case IP_UNICAST_IF:
 #ifdef IP_FREEBIND
         case IP_FREEBIND:
 #endif
+        case IP_MULTICAST_IF:
         case IP_MULTICAST_TTL:
         case IP_MULTICAST_LOOP:
             if (get_user_u32(len, optlen))
@@ -2914,6 +3206,32 @@ get_timeout:
                     return -TARGET_EFAULT;
             }
             break;
+        case SO_ORIGINAL_DST: {
+            if (get_user_u32(lv, optlen)) {
+                return -TARGET_EFAULT;
+            }
+
+            if ((int)lv < 0) {
+                return -TARGET_EINVAL;
+            }
+
+            struct sockaddr_in original_dst;
+            void *addr = (void *)&original_dst;
+
+            ret = get_errno(getsockopt(sockfd, level, optname, &original_dst, &lv));
+
+            if (ret < 0) {
+                return ret;
+            }
+
+            if (!is_error(ret)) {
+                if (host_to_target_sockaddr(optval_addr, addr, lv)
+                   || put_user_u32(lv, optlen)) {
+                    return -TARGET_EFAULT;
+                }
+            }
+            break;
+        }
         default:
             ret = -TARGET_ENOPROTOOPT;
             break;
@@ -2943,6 +3261,9 @@ get_timeout:
         case IPV6_2292DSTOPTS:
         case IPV6_TCLASS:
         case IPV6_ADDR_PREFERENCES:
+        case IPV6_DONTFRAG:
+        case IPV6_HOPLIMIT:
+        case IPV6_PKTINFO:
 #ifdef IPV6_RECVPATHMTU
         case IPV6_RECVPATHMTU:
 #endif
@@ -2955,6 +3276,8 @@ get_timeout:
 #ifdef IPV6_RECVORIGDSTADDR
         case IPV6_RECVORIGDSTADDR:
 #endif
+        case IPV6_UNICAST_IF:
+        case IPV6_MULTICAST_IF:
             if (get_user_u32(len, optlen))
                 return -TARGET_EFAULT;
             if (len < 0)
@@ -3050,6 +3373,31 @@ get_timeout:
         }
         break;
 #endif /* SOL_NETLINK */
+    case SOL_CAN_RAW:
+    {
+        char * can_raw_val;
+        if (get_user_u32(len, optlen)) {
+            return -TARGET_EFAULT;
+        }
+        if (len < 0) {
+            return -TARGET_EINVAL;
+        }
+        can_raw_val = lock_user(VERIFY_WRITE, optval_addr, len, 1);
+        if (!can_raw_val && len > 0) {
+            return -TARGET_EFAULT;
+        }
+        lv = len;
+        ret = get_errno(getsockopt(sockfd, SOL_CAN_RAW, optname, can_raw_val, &lv));
+        if (ret < 0) {
+            unlock_user(can_raw_val, optval_addr, 0);
+            return ret;
+        }
+        unlock_user(can_raw_val, optval_addr, 0);
+        if (put_user_u32(lv, optlen)) {
+            return -TARGET_EFAULT;
+        }
+        break;
+    }
     default:
     unimplemented:
         qemu_log_mask(LOG_UNIMP,
@@ -3146,6 +3494,11 @@ static struct iovec *lock_iovec(int type, abi_ulong target_addr,
                 len = max_len - total_len;
             }
         }
+        if ((len == 4096) && (qemu_real_host_page_size > len)) {
+            qemu_log_mask(LAT_LOG_SYSCALL,
+                    "[LATX_SYSCALL] struct iovec[%d]->iov_len = " TARGET_FMT_ld
+                    ";//host page size > target page size.\n", i, len);
+        }
         vec[i].iov_len = len;
         total_len += len;
     }
@@ -3182,6 +3535,122 @@ static void unlock_iovec(struct iovec *vec, abi_ulong target_addr,
                 break;
             }
             unlock_user(vec[i].iov_base, base, copy ? vec[i].iov_len : 0);
+        }
+        unlock_user(target_vec, target_addr, 0);
+    }
+
+    g_free(vec);
+}
+
+static struct iovec *lock_iovec_remap(int type, abi_ulong target_addr,
+                                abi_ulong count, int copy)
+{
+    struct target_iovec *target_vec;
+    struct iovec *vec;
+    abi_ulong total_len, max_len;
+    int i;
+    int err = 0;
+    bool bad_address = false;
+
+    if (count == 0) {
+        errno = 0;
+        return NULL;
+    }
+    if (count > IOV_MAX) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    vec = g_try_new0(struct iovec, count);
+    if (vec == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    target_vec = lock_user(VERIFY_READ, target_addr,
+                           count * sizeof(struct target_iovec), 1);
+    if (target_vec == NULL) {
+        err = EFAULT;
+        goto fail2;
+    }
+
+    /* ??? If host page size > target page size, this will result in a
+       value larger than what we can actually support.  */
+    max_len = 0x7fffffff & TARGET_PAGE_MASK;
+    total_len = 0;
+
+    for (i = 0; i < count; i++) {
+        abi_ulong base = tswapal(target_vec[i].iov_base);
+        abi_long len = tswapal(target_vec[i].iov_len);
+
+        if (len < 0) {
+            err = EINVAL;
+            goto fail;
+        } else if (len == 0) {
+            /* Zero length pointer is ignored.  */
+            vec[i].iov_base = 0;
+        } else {
+            vec[i].iov_base = lock_user_remap(type, base, len, copy);
+            /* If the first buffer pointer is bad, this is a fault.  But
+             * subsequent bad buffers will result in a partial write; this
+             * is realized by filling the vector with null pointers and
+             * zero lengths. */
+            if (!vec[i].iov_base) {
+                if (i == 0) {
+                    err = EFAULT;
+                    goto fail;
+                } else {
+                    bad_address = true;
+                }
+            }
+            if (bad_address) {
+                len = 0;
+            }
+            if (len > max_len - total_len) {
+                len = max_len - total_len;
+            }
+        }
+        if ((len == 4096) && (qemu_real_host_page_size > len)) {
+            qemu_log_mask(LAT_LOG_SYSCALL,
+                    "[LATX_SYSCALL] struct iovec[%d]->iov_len = " TARGET_FMT_ld
+                    ";//host page size > target page size.\n", i, len);
+        }
+        vec[i].iov_len = len;
+        total_len += len;
+    }
+
+    unlock_user(target_vec, target_addr, 0);
+    return vec;
+
+ fail:
+    while (--i >= 0) {
+        if (tswapal(target_vec[i].iov_len) > 0) {
+            unlock_user_remap(vec[i].iov_base, tswapal(target_vec[i].iov_base), 0);
+        }
+    }
+    unlock_user(target_vec, target_addr, 0);
+ fail2:
+    g_free(vec);
+    errno = err;
+    return NULL;
+}
+
+static void unlock_iovec_remap(struct iovec *vec, abi_ulong target_addr,
+                         abi_ulong count, int copy)
+{
+    struct target_iovec *target_vec;
+    int i;
+
+    target_vec = lock_user(VERIFY_READ, target_addr,
+                           count * sizeof(struct target_iovec), 1);
+    if (target_vec) {
+        for (i = 0; i < count; i++) {
+            abi_ulong base = tswapal(target_vec[i].iov_base);
+            abi_long len = tswapal(target_vec[i].iov_len);
+            if (len < 0) {
+                break;
+            }
+            unlock_user_remap(vec[i].iov_base, base, copy ? vec[i].iov_len : 0);
         }
         unlock_user(target_vec, target_addr, 0);
     }
@@ -3254,7 +3723,8 @@ static abi_long do_socket(int domain, int type, int protocol)
          protocol == NETLINK_ROUTE ||
 #endif
          protocol == NETLINK_KOBJECT_UEVENT ||
-         protocol == NETLINK_AUDIT)) {
+         protocol == NETLINK_AUDIT ||
+         protocol == NETLINK_CRYPTO)) {
         return -TARGET_EPROTONOSUPPORT;
     }
 
@@ -3283,6 +3753,9 @@ static abi_long do_socket(int domain, int type, int protocol)
                 break;
             case NETLINK_AUDIT:
                 fd_trans_register(ret, &target_netlink_audit_trans);
+                break;
+            case NETLINK_CRYPTO:
+                fd_trans_register(ret, &target_netlink_crypto_trans);
                 break;
             default:
                 g_assert_not_reached();
@@ -3330,6 +3803,68 @@ static abi_long do_connect(int sockfd, abi_ulong target_addr,
         return ret;
 
     return get_errno(safe_connect(sockfd, addr, addrlen));
+}
+
+#define BUFF_4K 4096
+#define BUFF_16K 16384
+static __thread struct nlmsghdr *pre_nlmh;
+static __thread void* buf;
+static __thread abi_long all_len;
+
+static void set_16k_buf(struct msghdr *msg)
+{
+    buf = malloc(BUFF_16K);
+    assert(buf);
+    msg->msg_iov->iov_len = BUFF_16K;
+    msg->msg_iov->iov_base = buf;
+    pre_nlmh = buf;
+}
+
+static abi_long get_from_16k_buf(struct msghdr *msg)
+{
+#ifdef LATX_DEBUG
+    struct sockaddr *saddr = msg->msg_name;
+    /* Fix me! */
+    /* Need make msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}. */
+    assert(sockaddr && sockaddr->sa_family == AF_NETLINK);
+#endif
+    struct nlmsghdr *nlmh = pre_nlmh;
+    abi_long curr_nlmh_len = 0;
+    for (;NLMSG_OK (nlmh, all_len);
+            nlmh = (struct nlmsghdr *) NLMSG_NEXT (nlmh, all_len)) {
+        if (curr_nlmh_len + nlmh->nlmsg_len > BUFF_4K) {
+            break;
+        }
+        curr_nlmh_len += nlmh->nlmsg_len;
+    }
+    memcpy(msg->msg_iov->iov_base, pre_nlmh, BUFF_4K);
+    if (NLMSG_OK(nlmh, all_len)) {
+        pre_nlmh = nlmh;
+    } else {
+        pre_nlmh = NULL;
+        free(buf);
+        buf = NULL;
+    }
+    return curr_nlmh_len;
+}
+
+static int get_socket_domain(int sockfd) {
+    int socket_domain;
+    socklen_t optlen = sizeof(socket_domain);
+    if (getsockopt(sockfd, SOL_SOCKET, SO_DOMAIN, &socket_domain, &optlen) == -1) {
+        return -1;
+    }
+    return socket_domain;
+}
+
+static bool buf_need_fix(struct msghdr *msg, int fd)
+{
+    int socket_domain = get_socket_domain(fd);
+    if (socket_domain == AF_NETLINK && msg->msg_iov->iov_len == BUFF_4K
+            && sysconf(_SC_PAGESIZE) == BUFF_16K) {
+        return true;
+    }
+    return false;
 }
 
 /* do_sendrecvmsg_locked() Must return target values and target errnos. */
@@ -3381,10 +3916,6 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
 
     vec = lock_iovec(send ? VERIFY_READ : VERIFY_WRITE,
                      target_vec, count, send);
-    if (vec == NULL) {
-        ret = -host_to_target_errno(errno);
-        goto out2;
-    }
     msg.msg_iovlen = count;
     msg.msg_iov = vec;
 
@@ -3408,18 +3939,38 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
             }
         }
     } else {
-        ret = get_errno(safe_recvmsg(fd, &msg, flags));
+        bool need_fix = buf_need_fix(&msg, fd);
+        if (need_fix) {
+            if (!buf) {
+                void *iov_base = msg.msg_iov->iov_base;
+                size_t iov_len = msg.msg_iov->iov_len;
+                set_16k_buf(&msg);
+                ret = get_errno(safe_recvmsg(fd, &msg, flags));
+                if (is_error(ret)) {
+                    assert(0);
+                    goto out;
+                }
+                msg.msg_iov->iov_base = iov_base;
+                msg.msg_iov->iov_len = iov_len;
+                all_len = ret;
+            }
+            ret =  get_from_16k_buf(&msg);
+        } else {
+            ret = get_errno(safe_recvmsg(fd, &msg, flags));
+        }
+
         if (!is_error(ret)) {
             len = ret;
             if (fd_trans_host_to_target_data(fd)) {
                 ret = fd_trans_host_to_target_data(fd)(msg.msg_iov->iov_base,
                                                MIN(msg.msg_iov->iov_len, len));
-            } else {
+            }
+            if (!is_error(ret)) {
                 ret = host_to_target_cmsg(msgp, &msg);
             }
             if (!is_error(ret)) {
                 msgp->msg_namelen = tswap32(msg.msg_namelen);
-                msgp->msg_flags = tswap32(msg.msg_flags);
+                msgp->msg_flags |= tswap32(msg.msg_flags);
                 if (msg.msg_name != NULL && msg.msg_name != (void *)-1) {
                     ret = host_to_target_sockaddr(tswapal(msgp->msg_name),
                                     msg.msg_name, msg.msg_namelen);
@@ -3427,7 +3978,6 @@ static abi_long do_sendrecvmsg_locked(int fd, struct target_msghdr *msgp,
                         goto out;
                     }
                 }
-
                 ret = len;
             }
         }
@@ -3465,11 +4015,10 @@ static abi_long do_sendrecvmsg(int fd, abi_ulong target_msg,
 
 static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
                                 unsigned int vlen, unsigned int flags,
-                                int send)
+                                int send, struct timespec *timeout)
 {
     struct target_mmsghdr *mmsgp;
     abi_long ret = 0;
-    int i;
 
     if (vlen > UIO_MAXIOV) {
         vlen = UIO_MAXIOV;
@@ -3480,6 +4029,18 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
         return -TARGET_EFAULT;
     }
 
+#ifdef TARGET_X86_64
+    /* direct syscall (only for 64bit guest and host) */
+    if(send==0) {
+        ret = get_errno(safe_recvmmsg(fd, (struct msghdr *)mmsgp, vlen, flags, timeout));
+    } else {
+        ret = get_errno(safe_sendmmsg(fd, (struct msghdr *)mmsgp, vlen, flags));
+    }
+    unlock_user(mmsgp, target_msgvec, sizeof(*mmsgp) * vlen);
+	return ret;
+#else
+    /* use sendmsg/recvmsg to emulate sendmmsg/recvmmsg */
+    int i;
     for (i = 0; i < vlen; i++) {
         ret = do_sendrecvmsg_locked(fd, &mmsgp[i].msg_hdr, flags, send);
         if (is_error(ret)) {
@@ -3492,6 +4053,15 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
         }
     }
 
+    /* timeout used only in recvmmsg but not supported */
+	if (timeout) {
+#ifdef CONFIG_LATX_DEBUG
+        qemu_log_mask(LAT_LOG_SYSCALL,
+                "[LATX_SYSCALL] do_sendrecvmmsg error fd " TARGET_FMT_ld
+                " with timeout not supported\n", fd);
+#endif
+	}
+
     unlock_user(mmsgp, target_msgvec, sizeof(*mmsgp) * i);
 
     /* Return number of datagrams sent if we sent any at all;
@@ -3501,6 +4071,7 @@ static abi_long do_sendrecvmmsg(int fd, abi_ulong target_msgvec,
         return i;
     }
     return ret;
+#endif
 }
 
 /* do_accept4() Must return target values and target errnos. */
@@ -3523,6 +4094,10 @@ static abi_long do_accept4(int fd, abi_ulong target_addr,
         return -TARGET_EFAULT;
 
     if ((int)addrlen < 0) {
+        return -TARGET_EINVAL;
+    }
+
+    if (!page_check_range((target_ulong)target_addr, addrlen, 0)) {
         return -TARGET_EINVAL;
     }
 
@@ -3813,23 +4388,15 @@ static abi_long do_socketcall(int num, abi_ulong vptr)
     case TARGET_SYS_ACCEPT4: /* sockfd, addr, addrlen, flags */
         return do_accept4(a[0], a[1], a[2], a[3]);
     case TARGET_SYS_RECVMMSG: /* sockfd, msgvec, vlen, flags */
-        return do_sendrecvmmsg(a[0], a[1], a[2], a[3], 0);
+        return do_sendrecvmmsg(a[0], a[1], a[2], a[3], 0, (struct timespec *)(uintptr_t)a[4]);
     case TARGET_SYS_SENDMMSG: /* sockfd, msgvec, vlen, flags */
-        return do_sendrecvmmsg(a[0], a[1], a[2], a[3], 1);
+        return do_sendrecvmmsg(a[0], a[1], a[2], a[3], 1, NULL);
     default:
         qemu_log_mask(LOG_UNIMP, "Unsupported socketcall: %d\n", num);
         return -TARGET_EINVAL;
     }
 }
 #endif
-
-#define N_SHM_REGIONS	32
-
-static struct shm_region {
-    abi_ulong start;
-    abi_ulong size;
-    bool in_use;
-} shm_regions[N_SHM_REGIONS];
 
 #ifndef TARGET_SEMID64_DS
 /* asm-generic version of this struct */
@@ -4232,8 +4799,8 @@ struct target_msqid_ds
     abi_ulong __msg_cbytes;
     abi_ulong msg_qnum;
     abi_ulong msg_qbytes;
-    abi_ulong msg_lspid;
-    abi_ulong msg_lrpid;
+    uint32_t msg_lspid;
+    uint32_t msg_lrpid;
     abi_ulong __unused4;
     abi_ulong __unused5;
 };
@@ -4599,10 +5166,22 @@ static inline abi_ulong target_shmlba(CPUArchState *cpu_env)
     return TARGET_PAGE_SIZE;
 }
 #endif
-
+abi_ulong latx_is_shm(abi_ulong maddr);
+abi_ulong latx_is_shm(abi_ulong maddr)
+{
+    for (int i = 0; i < N_SHM_REGIONS; ++i) {
+        if (shm_regions[i].in_use &&
+            shm_regions[i].start <= maddr &&
+            shm_regions[i].start + shm_regions[i].size >= maddr) {
+	        return shm_regions[i].start;
+        }
+    }
+    return 0;
+}
 static inline abi_ulong do_shmat(CPUArchState *cpu_env,
                                  int shmid, abi_ulong shmaddr, int shmflg)
 {
+    CPUState *cpu = env_cpu(cpu_env);
     abi_long raddr;
     void *host_raddr;
     struct shmid_ds shm_info;
@@ -4633,9 +5212,29 @@ static inline abi_ulong do_shmat(CPUArchState *cpu_env,
 
     mmap_lock();
 
-    if (shmaddr)
+    /*
+     * We're mapping shared memory, so ensure we generate code for parallel
+     * execution and flush old translations.  This will work up to the level
+     * supported by the host -- anything that requires EXCP_ATOMIC will not
+     * be atomic with respect to an external process.
+     */
+    if (!(cpu->tcg_cflags & CF_PARALLEL)) {
+        cpu->tcg_cflags |= CF_PARALLEL;
+        tb_flush(cpu);
+#ifdef CONFIG_LATX
+        if (!close_latx_parallel) {
+            latx_fast_jmp_cache_free(cpu_env);
+        }
+#endif
+    }
+
+    if (shmaddr) {
+#ifdef LATX_DEBUG
+        fprintf(stderr, "[LATX-WARNING] %s:%d\n", __func__, __LINE__);
+#endif
+	    shmflg |= SHM_REMAP;
         host_raddr = shmat(shmid, (void *)g2h_untagged(shmaddr), shmflg);
-    else {
+    } else {
         abi_ulong mmap_start;
 
         /* In order to use the host shmat, we need to honor host SHMLBA.  */
@@ -4924,6 +5523,68 @@ static abi_long do_ioctl_fs_ioc_fiemap(const IOCTLEntry *ie, uint8_t *buf_temp,
     return ret;
 }
 #endif
+
+static abi_long do_ioctl_fideduperange(const IOCTLEntry *ie, uint8_t *buf_temp,
+                                       int fd, int cmd, abi_long arg)
+{
+    int target_size_in, target_size_out;
+    struct file_dedupe_range  *same;
+    const argtype *arg_type = ie->arg_type;
+    const argtype extent_arg_type[] = { MK_STRUCT(STRUCT_file_dedupe_range_info) };
+    void *argptr, *p;
+    abi_long ret;
+    int i, extent_size = thunk_type_size(extent_arg_type, 0);
+    uint32_t inbufsz;
+
+    assert(arg_type[0] == TYPE_PTR);
+    assert(ie->access == IOC_RW);
+    arg_type++;
+    target_size_in = thunk_type_size(arg_type, 0);
+    argptr = lock_user(VERIFY_READ, arg, target_size_in, 1);
+    if (!argptr) {
+        return -TARGET_EFAULT;
+    }
+    thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
+    unlock_user(argptr, arg, 0);
+    same = (struct file_dedupe_range *)buf_temp;
+    if (same->dest_count !=0 ){
+        inbufsz = target_size_in + same->dest_count * extent_size;
+        assert(inbufsz < MAX_STRUCT_SIZE);
+        argptr = lock_user(VERIFY_READ, arg, inbufsz, 1);
+        if (!argptr) {
+            return -TARGET_EFAULT;
+        }
+        thunk_convert(buf_temp, argptr, arg_type, THUNK_HOST);
+        unlock_user(argptr, arg, 0);
+        memcpy(same->info, argptr + target_size_in, extent_size);
+    }
+    ret = get_errno(safe_ioctl(fd, ie->host_cmd, same));
+    if (!is_error(ret)) {
+        target_size_out = target_size_in;
+        if (same->dest_count != 0) {
+            target_size_out += same->dest_count * extent_size;
+        }
+        argptr = lock_user(VERIFY_WRITE, arg, target_size_out, 0);
+        if (!argptr) {
+            ret = -TARGET_EFAULT;
+        } else {
+            /* Convert the struct fiemap */
+            thunk_convert(argptr, same, arg_type, THUNK_TARGET);
+
+            if (same->dest_count != 0) {
+                p = argptr + target_size_in;
+                /* ...and then all the struct fiemap_extents */
+                for (i = 0; i < same->dest_count; i++) {
+                    thunk_convert(p, &same->info[i], extent_arg_type,
+                                  THUNK_TARGET);
+                    p += extent_size;
+                }
+            }
+            unlock_user(argptr, arg, target_size_out);
+        }
+    }
+    return ret;
+}
 
 static abi_long do_ioctl_ifconf(const IOCTLEntry *ie, uint8_t *buf_temp,
                                 int fd, int cmd, abi_long arg)
@@ -5680,32 +6341,73 @@ static inline void host_to_target_drmversion(
     unlock_drm_version(host_ver, target_ver, true);
 }
 
+static inline abi_long target_to_host_gem_create(struct drm_radeon_gem_create *host_ver,
+                                          struct target_drm_radeon_gem_create *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->size, &target_ver->size);
+    __get_user(host_ver->alignment, &target_ver->alignment);
+    __get_user(host_ver->handle, &target_ver->handle);
+    __get_user(host_ver->initial_domain, &target_ver->initial_domain);
+    __get_user(host_ver->flags, &target_ver->flags);
+    return 0;
+}
+
+static inline void host_to_target_gem_create(
+                                          struct target_drm_radeon_gem_create *target_ver,
+                                          struct drm_radeon_gem_create *host_ver)
+{
+    __put_user(host_ver->size, &target_ver->size);
+    __put_user(host_ver->alignment, &target_ver->alignment);
+    __put_user(host_ver->handle, &target_ver->handle);
+    __put_user(host_ver->initial_domain, &target_ver->initial_domain);
+    __put_user(host_ver->flags, &target_ver->flags);
+}
+
 static abi_long do_ioctl_drm(const IOCTLEntry *ie, uint8_t *buf_temp,
                              int fd, int cmd, abi_long arg)
 {
+    abi_long ret;
     struct drm_version *ver;
     struct target_drm_version *target_ver;
-    abi_long ret;
+    struct drm_radeon_gem_create *gem_create;
+    struct target_drm_radeon_gem_create *target_gem_create;
 
     switch (ie->host_cmd) {
-    case DRM_IOCTL_VERSION:
-        if (!lock_user_struct(VERIFY_WRITE, target_ver, arg, 0)) {
-            return -TARGET_EFAULT;
-        }
-        ver = (struct drm_version *)buf_temp;
-        ret = target_to_host_drmversion(ver, target_ver);
-        if (!is_error(ret)) {
-            ret = get_errno(safe_ioctl(fd, ie->host_cmd, ver));
-            if (is_error(ret)) {
-                unlock_drm_version(ver, target_ver, false);
-            } else {
-                host_to_target_drmversion(target_ver, ver);
-            }
-        }
-        unlock_user_struct(target_ver, arg, 0);
-        return ret;
+       case DRM_IOCTL_VERSION:
+            if (!lock_user_struct(VERIFY_WRITE, target_ver, arg, 0)) {
+                return -TARGET_EFAULT;
+               }
+            ver = (struct drm_version *)buf_temp;
+            ret = target_to_host_drmversion(ver, target_ver);
+            if (!is_error(ret)) {
+                ret = get_errno(safe_ioctl(fd, ie->host_cmd, ver));
+                if (is_error(ret)) {
+                    unlock_drm_version(ver, target_ver, false);
+                } else {
+                    host_to_target_drmversion(target_ver, ver);
+                    }
+               }
+            unlock_user_struct(target_ver, arg, 0);
+            return ret;
+       case DRM_IOCTL_RADEON_GEM_CREATE:
+            if (!lock_user_struct(VERIFY_WRITE, target_gem_create, arg, 0)) {
+                return -TARGET_EFAULT;
+               }
+            gem_create = (struct drm_radeon_gem_create *)buf_temp;
+            ret = target_to_host_gem_create(gem_create, target_gem_create);
+            if (!is_error(ret)) {
+                ret = get_errno(safe_ioctl(fd, ie->host_cmd, gem_create));
+                if (is_error(ret)) {
+                    assert(0);
+                } else {
+                    host_to_target_gem_create(target_gem_create, gem_create);
+                    }
+                }
+            unlock_user_struct(target_gem_create, arg, 0);
+            return ret;
     }
-    return -TARGET_ENOSYS;
+   return -TARGET_ENOSYS;
 }
 
 static abi_long do_ioctl_drm_i915_getparam(const IOCTLEntry *ie,
@@ -5780,6 +6482,1632 @@ static abi_long do_ioctl_TUNSETTXFILTER(const IOCTLEntry *ie, uint8_t *buf_temp,
     return get_errno(safe_ioctl(fd, ie->host_cmd, filter));
 }
 
+static inline abi_long target_to_host_ext_ctrls(struct v4l2_ext_controls *host_ver,
+                                          struct target_v4l2_ext_controls *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    uint64_t controls;
+    __get_user(host_ver->ctrl_class, &target_ver->ctrl_class);
+    __get_user(host_ver->count, &target_ver->count);
+    __get_user(host_ver->error_idx, &target_ver->error_idx);
+#if defined(IS_KYLIN) || defined(IS_NFS)
+    __get_user(host_ver->request_fd,
+                                    &target_ver->reserved[0]);
+    __get_user(host_ver->reserved[0],
+                                    &target_ver->reserved[1]);
+#else
+    __get_user(host_ver->reserved[0],
+                                    &target_ver->reserved[0]);
+    __get_user(host_ver->reserved[1],
+                                    &target_ver->reserved[1]);
+#endif
+    __get_user(controls, &target_ver->controls);
+    host_ver->controls = (struct v4l2_ext_control *)controls;
+    return 0;
+}
+
+static inline void host_to_target_ext_ctrls(
+                  struct target_v4l2_ext_controls *target_ver,
+                  struct v4l2_ext_controls *host_ver)
+{
+    uint64_t controls = (uint64_t)host_ver->controls;
+    __put_user(host_ver->ctrl_class, &target_ver->ctrl_class);
+    __put_user(host_ver->count, &target_ver->count);
+    __put_user(host_ver->error_idx, &target_ver->error_idx);
+#if defined(IS_KYLIN) || defined(IS_NFS)
+    __put_user(host_ver->request_fd,
+                                    &target_ver->reserved[0]);
+    __put_user(host_ver->reserved[0],
+                                    &target_ver->reserved[1]);
+#else
+    __put_user(host_ver->reserved[0],
+                                    &target_ver->reserved[0]);
+    __put_user(host_ver->reserved[1],
+                                    &target_ver->reserved[1]);
+#endif
+    __put_user(controls, &target_ver->controls);
+}
+
+static inline abi_long target_to_host_v4l2_fmt(
+                  struct v4l2_format *host_ver,
+                  struct target_v4l2_format *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->type, &target_ver->type);
+    /*
+    * NOTE: it seems like all union structures are
+    * same as bit64, so memcpy directly.
+    */
+    memcpy(host_ver->fmt.raw_data, target_ver->fmt.raw_data,
+                            sizeof(target_ver->fmt.raw_data));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_fmt(
+                  struct target_v4l2_format *target_ver,
+                  struct v4l2_format *host_ver)
+{
+    __put_user(host_ver->type, &target_ver->type);
+    memcpy(target_ver->fmt.raw_data , host_ver->fmt.raw_data,
+                              sizeof(host_ver->fmt.raw_data));
+}
+
+static inline abi_long target_to_host_v4l2_fb(
+                  struct v4l2_framebuffer *host_ver,
+                  struct target_v4l2_framebuffer *target_ver)
+{
+    uint64_t base;
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->capability, &target_ver->capability);
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(base, &target_ver->base);
+    host_ver->base = (void *)base;
+    memcpy(&host_ver->fmt, &target_ver->fmt,
+                                     sizeof(target_ver->fmt));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_fb(
+                   struct target_v4l2_framebuffer *target_ver,
+                   struct v4l2_framebuffer *host_ver)
+{
+    uint64_t base = (uint64_t)host_ver->base;
+    __put_user(host_ver->capability, &target_ver->capability);
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(base, &target_ver->base);
+    memcpy(&target_ver->fmt,
+                       &host_ver->fmt, sizeof(host_ver->fmt));
+}
+
+static inline abi_long target_to_host_v4l2_eminput(
+                   struct v4l2_input *host_ver,
+                   struct target_v4l2_input *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->index, &target_ver->index);
+    memcpy(host_ver->name, target_ver->name,
+                                    sizeof(target_ver->name));
+    __get_user(host_ver->type, &target_ver->type);
+    __get_user(host_ver->audioset, &target_ver->audioset);
+    __get_user(host_ver->tuner, &target_ver->tuner);
+    __get_user(host_ver->std, &target_ver->std);
+    __get_user(host_ver->status, &target_ver->status);
+    __get_user(host_ver->capabilities,
+                                   &target_ver->capabilities);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_eminput(
+                         struct target_v4l2_input *target_ver,
+                         struct v4l2_input *host_ver)
+{
+    __put_user(host_ver->index, &target_ver->index);
+    memcpy(target_ver->name, host_ver->name,
+                                    sizeof(target_ver->name));
+    __put_user(host_ver->type, &target_ver->type);
+    __put_user(host_ver->audioset, &target_ver->audioset);
+    __put_user(host_ver->tuner, &target_ver->tuner);
+    __put_user(host_ver->std, &target_ver->std);
+    __put_user(host_ver->status, &target_ver->status);
+    __put_user(host_ver->capabilities,
+                                   &target_ver->capabilities);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_v4l2_std(
+                      struct v4l2_standard *host_ver,
+                      struct target_v4l2_standard *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->index, &target_ver->index);
+    __get_user(host_ver->id, &target_ver->id);
+    memcpy(host_ver->name, target_ver->name,
+                                    sizeof(target_ver->name));
+    __get_user(host_ver->frameperiod.numerator,
+                          &target_ver->frameperiod.numerator);
+    __get_user(host_ver->frameperiod.denominator,
+                        &target_ver->frameperiod.denominator);
+    __get_user(host_ver->framelines, &target_ver->framelines);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_std(
+                      struct target_v4l2_standard *target_ver,
+                      struct v4l2_standard *host_ver)
+{
+    __put_user(host_ver->index, &target_ver->index);
+    __put_user(host_ver->id, &target_ver->id);
+    memcpy(target_ver->name, host_ver->name,
+                                    sizeof(target_ver->name));
+    __put_user(host_ver->frameperiod.numerator,
+                          &target_ver->frameperiod.numerator);
+    __put_user(host_ver->frameperiod.denominator,
+                        &target_ver->frameperiod.denominator);
+    __put_user(host_ver->framelines, &target_ver->framelines);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_v4l2_buf(
+                        struct v4l2_buffer *host_ver,
+                        struct target_v4l2_buffer *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->index, &target_ver->index);
+    __get_user(host_ver->type, &target_ver->type);
+    __get_user(host_ver->bytesused, &target_ver->bytesused);
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(host_ver->field, &target_ver->field);
+    __get_user(host_ver->timestamp.tv_sec,
+                               &target_ver->timestamp.tv_sec);
+    __get_user(host_ver->timestamp.tv_usec,
+                              &target_ver->timestamp.tv_usec);
+    __get_user(host_ver->timecode.type,
+                                  &target_ver->timecode.type);
+    __get_user(host_ver->timecode.flags,
+                                 &target_ver->timecode.flags);
+    __get_user(host_ver->timecode.frames,
+                                &target_ver->timecode.frames);
+    __get_user(host_ver->timecode.seconds,
+                               &target_ver->timecode.seconds);
+    __get_user(host_ver->timecode.minutes,
+                               &target_ver->timecode.minutes);
+    __get_user(host_ver->timecode.hours,
+                                 &target_ver->timecode.hours);
+    memcpy(host_ver->timecode.userbits,
+                       target_ver->timecode.userbits,
+                       sizeof(target_ver->timecode.userbits));
+    __get_user(host_ver->sequence, &target_ver->sequence);
+    __get_user(host_ver->memory, &target_ver->memory);
+    __get_user(host_ver->m.userptr, &target_ver->m.userptr);
+    __get_user(host_ver->length, &target_ver->length);
+    __get_user(host_ver->reserved2, &target_ver->reserved2);
+    __get_user(host_ver->reserved, &target_ver->reserved);
+    return 0;
+}
+
+static inline void host_to_target_v4l2_buf(
+                        struct target_v4l2_buffer *target_ver,
+                        struct v4l2_buffer *host_ver)
+{
+    __put_user(host_ver->index, &target_ver->index);
+    __put_user(host_ver->type, &target_ver->type);
+    __put_user(host_ver->bytesused, &target_ver->bytesused);
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(host_ver->field, &target_ver->field);
+    __put_user(host_ver->timestamp.tv_sec,
+                               &target_ver->timestamp.tv_sec);
+    __put_user(host_ver->timestamp.tv_usec,
+                              &target_ver->timestamp.tv_usec);
+    __put_user(host_ver->timecode.type,
+                                  &target_ver->timecode.type);
+    __put_user(host_ver->timecode.flags,
+                                 &target_ver->timecode.flags);
+    __put_user(host_ver->timecode.frames,
+                                &target_ver->timecode.frames);
+    __put_user(host_ver->timecode.seconds,
+                               &target_ver->timecode.seconds);
+    __put_user(host_ver->timecode.minutes,
+                               &target_ver->timecode.minutes);
+    __put_user(host_ver->timecode.hours,
+                                 &target_ver->timecode.hours);
+    memcpy(target_ver->timecode.userbits,
+                       host_ver->timecode.userbits,
+                       sizeof(target_ver->timecode.userbits));
+    __put_user(host_ver->sequence, &target_ver->sequence);
+    __put_user(host_ver->memory, &target_ver->memory);
+    __put_user(host_ver->m.userptr, &target_ver->m.userptr);
+    __put_user(host_ver->length, &target_ver->length);
+    __put_user(host_ver->reserved2, &target_ver->reserved2);
+    __put_user(host_ver->reserved, &target_ver->reserved);
+}
+
+static inline abi_long target_to_host_v4l2_exp_buf(
+                  struct v4l2_exportbuffer *host_ver,
+                  struct target_v4l2_exportbuffer *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->type, &target_ver->type);
+    __get_user(host_ver->index, &target_ver->index);
+    __get_user(host_ver->plane, &target_ver->plane);
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(host_ver->fd, &target_ver->fd);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_exp_buf(
+                  struct target_v4l2_exportbuffer *target_ver,
+                  struct v4l2_exportbuffer *host_ver)
+{
+    __put_user(host_ver->type, &target_ver->type);
+    __put_user(host_ver->index, &target_ver->index);
+    __put_user(host_ver->plane, &target_ver->plane);
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(host_ver->fd, &target_ver->fd);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_v4l2_edid(
+                          struct v4l2_edid *host_ver,
+                          struct target_v4l2_edid *target_ver)
+{
+    uint64_t edid;
+    memset(host_ver, 0, sizeof(*host_ver));
+
+    __get_user(host_ver->pad, &target_ver->pad);
+    __get_user(host_ver->start_block,
+                                    &target_ver->start_block);
+    __get_user(host_ver->blocks, &target_ver->blocks);
+
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                sizeof(target_ver->reserved));
+    __get_user(edid, &target_ver->edid);
+    host_ver->edid = (uint8_t *)edid;
+    return 0;
+}
+
+static inline void host_to_target_v4l2_edid(
+                          struct target_v4l2_edid *target_ver,
+                          struct v4l2_edid *host_ver)
+{
+    uint64_t edid = (uint64_t)host_ver->edid;
+    __put_user(host_ver->pad, &target_ver->pad);
+    __put_user(host_ver->start_block,
+                                    &target_ver->start_block);
+    __put_user(host_ver->blocks, &target_ver->blocks);
+
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                sizeof(target_ver->reserved));
+    __put_user(edid, &target_ver->edid);
+}
+
+static inline abi_long target_to_host_v4l2_create_buffers(
+                struct v4l2_create_buffers *host_ver,
+                struct target_v4l2_create_buffers *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->index, &target_ver->index);
+    __get_user(host_ver->count, &target_ver->count);
+    __get_user(host_ver->memory, &target_ver->memory);
+    __get_user(host_ver->format.type,
+                                    &target_ver->format.type);
+    /*
+    * NOTE: it seems like all union structures
+    * are same as bit64, so memcpy directly.
+    */
+    memcpy(host_ver->format.fmt.raw_data,
+                     target_ver->format.fmt.raw_data,
+                     sizeof(target_ver->format.fmt.raw_data));
+    memcpy(host_ver->reserved,
+          target_ver->reserved, sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_create_buffers(
+                struct target_v4l2_create_buffers *target_ver,
+                struct v4l2_create_buffers *host_ver)
+{
+
+    __put_user(host_ver->index, &target_ver->index);
+    __put_user(host_ver->count, &target_ver->count);
+    __put_user(host_ver->memory, &target_ver->memory);
+    __put_user(host_ver->format.type,
+                                    &target_ver->format.type);
+    memcpy(target_ver->format.fmt.raw_data,
+                       host_ver->format.fmt.raw_data,
+                       sizeof(host_ver->format.fmt.raw_data));
+    memcpy(target_ver->reserved,
+                       host_ver->reserved,
+                       sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_v4l2_event(
+                         struct v4l2_event *host_ver,
+                         struct target_v4l2_event *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->type, &target_ver->type);
+    memcpy(host_ver->u.data, target_ver->u.data,
+                                  sizeof(target_ver->u.data));
+    __get_user(host_ver->pending, &target_ver->pending);
+    __get_user(host_ver->sequence, &target_ver->sequence);
+    __get_user(host_ver->timestamp.tv_sec,
+                               &target_ver->timestamp.tv_sec);
+    __get_user(host_ver->timestamp.tv_nsec,
+                              &target_ver->timestamp.tv_nsec);
+    __get_user(host_ver->id, &target_ver->id);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_v4l2_event(
+                         struct target_v4l2_event *target_ver,
+                         struct v4l2_event *host_ver)
+{
+    __put_user(host_ver->type, &target_ver->type);
+    memcpy(target_ver->u.data, host_ver->u.data,
+                                  sizeof(target_ver->u.data));
+    __put_user(host_ver->pending, &target_ver->pending);
+    __put_user(host_ver->sequence, &target_ver->sequence);
+    __put_user(host_ver->timestamp.tv_sec,
+                               &target_ver->timestamp.tv_sec);
+    __put_user(host_ver->timestamp.tv_nsec,
+                              &target_ver->timestamp.tv_nsec);
+    __put_user(host_ver->id, &target_ver->id);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                sizeof(target_ver->reserved));
+}
+
+static abi_long do_ioctl_v4l2(const IOCTLEntry *ie,
+                             uint8_t *buf_temp,
+                             int fd, int cmd, abi_long arg)
+{
+    abi_long ret;
+    struct v4l2_ext_controls *ext_ctrls;
+    struct target_v4l2_ext_controls *target_ext_ctrls;
+    struct target_v4l2_format *target_v4l2_fmt;
+    struct v4l2_format *v4l2_fmt;
+    struct target_v4l2_framebuffer *target_v4l2_fb;
+    struct v4l2_framebuffer *v4l2_fb;
+    struct target_v4l2_input *target_v4l2_input;
+    struct v4l2_input *v4l2_input;
+    struct target_v4l2_standard *target_v4l2_std;
+    struct v4l2_standard *v4l2_std;
+    struct target_v4l2_buffer *target_v4l2_buffer;
+    struct v4l2_buffer *v4l2_buffer;
+    struct target_v4l2_exportbuffer *target_exp_buf;
+    struct v4l2_exportbuffer *exp_buf;
+    struct target_v4l2_edid *target_v4l2_edid;
+    struct v4l2_edid *v4l2_edid;
+    struct target_v4l2_create_buffers
+                                  *target_v4l2_create_buffers;
+    struct v4l2_create_buffers *v4l2_create_buffers;
+    struct target_v4l2_event *target_v4l2_event;
+    struct v4l2_event *v4l2_event;
+
+    switch (ie->host_cmd) {
+    case VIDIOC_TRY_EXT_CTRLS:
+    case VIDIOC_G_EXT_CTRLS:
+    case VIDIOC_S_EXT_CTRLS:
+        if (!lock_user_struct(VERIFY_READ, target_ext_ctrls, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        ext_ctrls = (struct v4l2_ext_controls *)buf_temp;
+        ret = target_to_host_ext_ctrls(ext_ctrls, target_ext_ctrls);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, ext_ctrls));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_ext_ctrls(target_ext_ctrls, ext_ctrls);
+            }
+        }
+        unlock_user_struct(target_ext_ctrls, arg, 0);
+        return ret;
+    case VIDIOC_G_FMT:
+    case VIDIOC_S_FMT:
+    case VIDIOC_TRY_FMT:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_fmt, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_fmt = (struct v4l2_format *)buf_temp;
+        ret = target_to_host_v4l2_fmt(v4l2_fmt, target_v4l2_fmt);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_fmt));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_fmt(target_v4l2_fmt, v4l2_fmt);
+            }
+        }
+        unlock_user_struct(target_v4l2_fmt, arg, 0);
+        return ret;
+    case VIDIOC_G_FBUF:
+        if (!lock_user_struct(VERIFY_WRITE, target_v4l2_fb, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_fb = (struct v4l2_framebuffer *)buf_temp;
+        ret = target_to_host_v4l2_fb(v4l2_fb, target_v4l2_fb);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_fb));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_fb(target_v4l2_fb, v4l2_fb);
+            }
+        }
+        unlock_user_struct(target_v4l2_fb, arg, 0);
+        return ret;
+    case VIDIOC_ENUMINPUT:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_input, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_input = (struct v4l2_input *)buf_temp;
+        ret = target_to_host_v4l2_eminput(v4l2_input, target_v4l2_input);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_input));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_eminput(target_v4l2_input, v4l2_input);
+            }
+        }
+        unlock_user_struct(target_v4l2_input, arg, 0);
+        return ret;
+    case VIDIOC_ENUMSTD:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_std, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_std = (struct v4l2_standard *)buf_temp;
+        ret = target_to_host_v4l2_std(v4l2_std, target_v4l2_std);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_std));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_std(target_v4l2_std, v4l2_std);
+            }
+        }
+        unlock_user_struct(target_v4l2_std, arg, 0);
+        return ret;
+    case VIDIOC_QUERYBUF:
+    case VIDIOC_QBUF:
+    case VIDIOC_DQBUF:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_buffer, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_buffer = (struct v4l2_buffer *)buf_temp;
+        ret = target_to_host_v4l2_buf(v4l2_buffer, target_v4l2_buffer);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_buffer));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+               host_to_target_v4l2_buf(target_v4l2_buffer, v4l2_buffer);
+            }
+        }
+        unlock_user_struct(target_v4l2_buffer, arg, 0);
+        return ret;
+    case VIDIOC_EXPBUF:
+        if (!lock_user_struct(VERIFY_READ, target_exp_buf, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        exp_buf = (struct v4l2_exportbuffer *)buf_temp;
+        ret = target_to_host_v4l2_exp_buf(exp_buf, target_exp_buf);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, exp_buf));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_exp_buf(target_exp_buf, exp_buf);
+            }
+        }
+        unlock_user_struct(target_exp_buf, arg, 0);
+        return ret;
+    case VIDIOC_G_EDID:
+    case VIDIOC_S_EDID:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_edid, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_edid = (struct v4l2_edid *)buf_temp;
+        ret = target_to_host_v4l2_edid(v4l2_edid, target_v4l2_edid);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_edid));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_edid(target_v4l2_edid, v4l2_edid);
+            }
+        }
+        unlock_user_struct(target_v4l2_edid, arg, 0);
+        return ret;
+    case VIDIOC_CREATE_BUFS:
+        if (!lock_user_struct(VERIFY_READ, target_v4l2_create_buffers, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_create_buffers = (struct v4l2_create_buffers *)buf_temp;
+        ret = target_to_host_v4l2_create_buffers(v4l2_create_buffers,
+                                  target_v4l2_create_buffers);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_create_buffers));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+               host_to_target_v4l2_create_buffers(target_v4l2_create_buffers,
+                                         v4l2_create_buffers);
+            }
+        }
+        unlock_user_struct(target_v4l2_create_buffers, arg, 0);
+        return ret;
+    case VIDIOC_DQEVENT:
+        if (!lock_user_struct(VERIFY_WRITE, target_v4l2_event, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        v4l2_event = (struct v4l2_event *)buf_temp;
+        ret = target_to_host_v4l2_event(v4l2_event, target_v4l2_event);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, v4l2_event));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_v4l2_event(target_v4l2_event, v4l2_event);
+            }
+        }
+        unlock_user_struct(target_v4l2_event, arg, 0);
+        return ret;
+    }
+   return -TARGET_ENOSYS;
+}
+
+static inline abi_long target_to_host_seq_port_info(
+                         struct snd_seq_port_info *host_ver,
+                         struct target_snd_seq_port_info *target_ver)
+{
+    uint64_t kernel;
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->addr.client, &target_ver->addr.client);
+    __get_user(host_ver->addr.port, &target_ver->addr.port);
+    memcpy(host_ver->name, target_ver->name,
+                                  sizeof(target_ver->name));
+    __get_user(host_ver->capability, &target_ver->capability);
+    __get_user(host_ver->type, &target_ver->type);
+    __get_user(host_ver->midi_channels, &target_ver->midi_channels);
+    __get_user(host_ver->midi_voices, &target_ver->midi_voices);
+    __get_user(host_ver->synth_voices, &target_ver->synth_voices);
+    __get_user(host_ver->read_use, &target_ver->read_use);
+    __get_user(host_ver->write_use, &target_ver->write_use);
+    __get_user(kernel, &target_ver->kernel);
+
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(host_ver->time_queue, &target_ver->time_queue);
+
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                  sizeof(target_ver->reserved));
+    host_ver->kernel = (uint8_t *)kernel;
+    return 0;
+}
+
+static inline void host_to_target_seq_port_info(
+                         struct target_snd_seq_port_info *target_ver,
+                         struct snd_seq_port_info *host_ver)
+{
+    uint64_t kernel = (uint64_t)host_ver->kernel;
+
+    __put_user(host_ver->addr.client, &target_ver->addr.client);
+    __put_user(host_ver->addr.port, &target_ver->addr.port);
+    memcpy(target_ver->name, host_ver->name,
+                                  sizeof(target_ver->name));
+    __put_user(host_ver->capability, &target_ver->capability);
+    __put_user(host_ver->type, &target_ver->type);
+    __put_user(host_ver->midi_channels, &target_ver->midi_channels);
+    __put_user(host_ver->midi_voices, &target_ver->midi_voices);
+    __put_user(host_ver->synth_voices, &target_ver->synth_voices);
+    __put_user(host_ver->read_use, &target_ver->read_use);
+    __put_user(host_ver->write_use, &target_ver->write_use);
+    __put_user(kernel, &target_ver->kernel);
+
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(host_ver->time_queue, &target_ver->time_queue);
+
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                  sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_snd_pcm_sync_ptr(
+                         struct snd_pcm_sync_ptr *host_ver,
+                         struct target_snd_pcm_sync_ptr *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(host_ver->s.status.state, &target_ver->s.status.state);
+    __get_user(host_ver->s.status.pad1, &target_ver->s.status.pad1);
+    __get_user(host_ver->s.status.hw_ptr, &target_ver->s.status.hw_ptr);
+    __get_user(host_ver->s.status.tstamp.tv_nsec,
+                                      &target_ver->s.status.tstamp.tv_nsec);
+    __get_user(host_ver->s.status.tstamp.tv_sec,
+                                      &target_ver->s.status.tstamp.tv_sec);
+    __get_user(host_ver->s.status.suspended_state,
+                                      &target_ver->s.status.suspended_state);
+    __get_user(host_ver->s.status.audio_tstamp.tv_nsec,
+                                      &target_ver->s.status.audio_tstamp.tv_nsec);
+    __get_user(host_ver->s.status.audio_tstamp.tv_sec,
+                                      &target_ver->s.status.audio_tstamp.tv_sec);
+    __get_user(host_ver->c.control.appl_ptr, &target_ver->c.control.appl_ptr);
+    __get_user(host_ver->c.control.avail_min, &target_ver->c.control.avail_min);
+
+    return 0;
+}
+
+static inline void host_to_target_snd_pcm_sync_ptr(
+                         struct target_snd_pcm_sync_ptr *target_ver,
+                         struct snd_pcm_sync_ptr *host_ver)
+{
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(host_ver->s.status.state, &target_ver->s.status.state);
+    __put_user(host_ver->s.status.pad1, &target_ver->s.status.pad1);
+    __put_user(host_ver->s.status.hw_ptr, &target_ver->s.status.hw_ptr);
+    __put_user(host_ver->s.status.tstamp.tv_nsec,
+                                      &target_ver->s.status.tstamp.tv_nsec);
+    __put_user(host_ver->s.status.tstamp.tv_sec,
+                                      &target_ver->s.status.tstamp.tv_sec);
+    __put_user(host_ver->s.status.suspended_state,
+                                      &target_ver->s.status.suspended_state);
+    __put_user(host_ver->s.status.audio_tstamp.tv_nsec,
+                                      &target_ver->s.status.audio_tstamp.tv_nsec);
+    __put_user(host_ver->s.status.audio_tstamp.tv_sec,
+                                      &target_ver->s.status.audio_tstamp.tv_sec);
+    __put_user(host_ver->c.control.appl_ptr, &target_ver->c.control.appl_ptr);
+    __put_user(host_ver->c.control.avail_min, &target_ver->c.control.avail_min);
+}
+
+static inline abi_long target_to_host_snd_hw_params(
+                         struct snd_pcm_hw_params *host_ver,
+                         struct target_snd_pcm_hw_params *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->flags, &target_ver->flags);
+    assert(ARRAY_SIZE(host_ver->masks) == ARRAY_SIZE(target_ver->masks));
+    memcpy(host_ver->masks, target_ver->masks,
+                                  sizeof(target_ver->masks));
+    memcpy(host_ver->mres, target_ver->mres,
+                                  sizeof(target_ver->mres));
+    memcpy(host_ver->intervals, target_ver->intervals,
+                                  sizeof(target_ver->intervals));
+    memcpy(host_ver->ires, target_ver->ires,
+                                  sizeof(target_ver->ires));
+    __get_user(host_ver->rmask, &target_ver->rmask);
+    __get_user(host_ver->cmask, &target_ver->cmask);
+    __get_user(host_ver->info, &target_ver->info);
+    __get_user(host_ver->msbits, &target_ver->msbits);
+    __get_user(host_ver->rate_num, &target_ver->rate_num);
+    __get_user(host_ver->rate_den, &target_ver->rate_den);
+    __get_user(host_ver->fifo_size, &target_ver->fifo_size);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                  sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_snd_hw_params(
+                         struct target_snd_pcm_hw_params *target_ver,
+                         struct snd_pcm_hw_params *host_ver)
+{
+    __put_user(host_ver->flags, &target_ver->flags);
+    assert(ARRAY_SIZE(host_ver->masks) == ARRAY_SIZE(target_ver->masks));
+    memcpy(target_ver->masks, host_ver->masks,
+                                  sizeof(target_ver->masks));
+    memcpy(target_ver->mres, host_ver->mres,
+                                  sizeof(target_ver->mres));
+    memcpy(target_ver->intervals, host_ver->intervals,
+                                  sizeof(target_ver->intervals));
+    memcpy(target_ver->ires, host_ver->ires,
+                                  sizeof(target_ver->ires));
+    __put_user(host_ver->rmask, &target_ver->rmask);
+    __put_user(host_ver->cmask, &target_ver->cmask);
+    __put_user(host_ver->info, &target_ver->info);
+    __put_user(host_ver->msbits, &target_ver->msbits);
+    __put_user(host_ver->rate_num, &target_ver->rate_num);
+    __put_user(host_ver->rate_den, &target_ver->rate_den);
+    __put_user(host_ver->fifo_size, &target_ver->fifo_size);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                  sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_snd_sw_params(
+                         struct snd_pcm_sw_params *host_ver,
+                         struct target_snd_pcm_sw_params *target_ver)
+{
+    __get_user(host_ver->tstamp_mode, &target_ver->tstamp_mode);
+    __get_user(host_ver->period_step, &target_ver->period_step);
+    __get_user(host_ver->sleep_min, &target_ver->sleep_min);
+    __get_user(host_ver->avail_min, &target_ver->avail_min);
+    __get_user(host_ver->xfer_align, &target_ver->xfer_align);
+    __get_user(host_ver->start_threshold, &target_ver->start_threshold);
+    __get_user(host_ver->stop_threshold, &target_ver->stop_threshold);
+    __get_user(host_ver->silence_threshold, &target_ver->silence_threshold);
+    __get_user(host_ver->silence_size, &target_ver->silence_size);
+    __get_user(host_ver->boundary, &target_ver->boundary);
+    __get_user(host_ver->proto, &target_ver->proto);
+    __get_user(host_ver->tstamp_type, &target_ver->tstamp_type);
+    memcpy(host_ver->reserved, target_ver->reserved,
+                                  sizeof(target_ver->reserved));
+    return 0;
+}
+
+static inline void host_to_target_snd_sw_params(
+                         struct target_snd_pcm_sw_params *target_ver,
+                         struct snd_pcm_sw_params *host_ver)
+{
+    __put_user(host_ver->tstamp_mode, &target_ver->tstamp_mode);
+    __put_user(host_ver->period_step, &target_ver->period_step);
+    __put_user(host_ver->sleep_min, &target_ver->sleep_min);
+    __put_user(host_ver->avail_min, &target_ver->avail_min);
+    __put_user(host_ver->xfer_align, &target_ver->xfer_align);
+    __put_user(host_ver->start_threshold, &target_ver->start_threshold);
+    __put_user(host_ver->stop_threshold, &target_ver->stop_threshold);
+    __put_user(host_ver->silence_threshold, &target_ver->silence_threshold);
+    __put_user(host_ver->silence_size, &target_ver->silence_size);
+    __put_user(host_ver->boundary, &target_ver->boundary);
+    __put_user(host_ver->proto, &target_ver->proto);
+    __put_user(host_ver->tstamp_type, &target_ver->tstamp_type);
+    memcpy(target_ver->reserved, host_ver->reserved,
+                                  sizeof(target_ver->reserved));
+}
+
+static inline abi_long target_to_host_snd_pcm_channel_info(
+                         struct snd_pcm_channel_info *host_ver,
+          struct target_snd_pcm_channel_info *target_ver)
+{
+    __get_user(host_ver->channel, &target_ver->channel);
+    __get_user(host_ver->offset, &target_ver->offset);
+    __get_user(host_ver->first, &target_ver->first);
+    __get_user(host_ver->step, &target_ver->step);
+    return 0;
+}
+
+static inline void host_to_target_snd_pcm_channel_info(
+                         struct target_snd_pcm_channel_info *target_ver,
+         struct snd_pcm_channel_info *host_ver)
+{
+    __put_user(host_ver->channel, &target_ver->channel);
+    __put_user(host_ver->offset, &target_ver->offset);
+    __put_user(host_ver->first, &target_ver->first);
+    __put_user(host_ver->step, &target_ver->step);
+}
+
+static inline abi_long target_to_host_snd_xferi(
+                         struct snd_xferi *host_ver,
+         struct target_snd_xferi *target_ver)
+{
+    uint64_t buf;
+    __get_user(host_ver->result, &target_ver->result);
+    __get_user(buf, &target_ver->buf);
+    host_ver->buf = (void *)buf;
+    __get_user(host_ver->frames, &target_ver->frames);
+    return 0;
+}
+
+static inline void host_to_target_snd_xferi(
+                         struct target_snd_xferi *target_ver,
+         struct snd_xferi *host_ver)
+{
+    uint64_t buf = (uint64_t)host_ver->buf;
+    __put_user(host_ver->result, &target_ver->result);
+    __put_user(buf, &target_ver->buf);
+    __put_user(host_ver->frames, &target_ver->frames);
+}
+
+static abi_long do_ioctl_seq(const IOCTLEntry *ie,
+                             uint8_t *buf_temp,
+                             int fd, int cmd, abi_long arg)
+{
+    abi_long ret;
+    struct target_snd_seq_port_info *target_seq_port_info;
+    struct snd_seq_port_info *seq_port_info;
+    struct target_snd_pcm_sync_ptr *target_pcm_sync_ptr;
+    struct snd_pcm_sync_ptr *pcm_sync_ptr;
+    struct target_snd_pcm_hw_params *target_snd_pcm_hw_params;
+    struct snd_pcm_hw_params *snd_pcm_hw_params;
+    struct target_snd_pcm_sw_params *target_snd_pcm_sw_params;
+    struct snd_pcm_sw_params *snd_pcm_sw_params;
+    struct target_snd_pcm_channel_info *target_snd_pcm_channel_info;
+    struct snd_pcm_channel_info *snd_pcm_channel_info;
+    struct target_snd_xferi *target_snd_xferi;
+    struct snd_xferi *snd_xferi;
+
+    switch (ie->host_cmd) {
+    case SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT:
+    case SNDRV_SEQ_IOCTL_DELETE_PORT:
+    case SNDRV_SEQ_IOCTL_CREATE_PORT:
+        if (!lock_user_struct(VERIFY_READ, target_seq_port_info, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        seq_port_info = (struct snd_seq_port_info *)buf_temp;
+        ret = target_to_host_seq_port_info(seq_port_info, target_seq_port_info);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, seq_port_info));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_seq_port_info(target_seq_port_info, seq_port_info);
+            }
+        }
+        unlock_user_struct(target_seq_port_info, arg, 0);
+        return ret;
+    case SNDRV_PCM_IOCTL_SYNC_PTR:
+        if (!lock_user_struct(VERIFY_READ, target_pcm_sync_ptr, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        pcm_sync_ptr = (struct snd_pcm_sync_ptr *)buf_temp;
+        ret = target_to_host_snd_pcm_sync_ptr(pcm_sync_ptr, target_pcm_sync_ptr);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, pcm_sync_ptr));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_snd_pcm_sync_ptr(target_pcm_sync_ptr, pcm_sync_ptr);
+            }
+        }
+        unlock_user_struct(target_pcm_sync_ptr, arg, 0);
+        return ret;
+    case SNDRV_PCM_IOCTL_HW_REFINE:
+    case SNDRV_PCM_IOCTL_HW_PARAMS:
+        if (!lock_user_struct(VERIFY_READ, target_snd_pcm_hw_params, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        snd_pcm_hw_params = (struct snd_pcm_hw_params *)buf_temp;
+        ret = target_to_host_snd_hw_params(snd_pcm_hw_params, target_snd_pcm_hw_params);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, snd_pcm_hw_params));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_snd_hw_params(target_snd_pcm_hw_params, snd_pcm_hw_params);
+            }
+        }
+        unlock_user_struct(target_snd_pcm_hw_params, arg, 0);
+        return ret;
+    case SNDRV_PCM_IOCTL_SW_PARAMS:
+        if (!lock_user_struct(VERIFY_READ, target_snd_pcm_sw_params, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        snd_pcm_sw_params = (struct snd_pcm_sw_params *)buf_temp;
+        ret = target_to_host_snd_sw_params(snd_pcm_sw_params,
+                 target_snd_pcm_sw_params);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, snd_pcm_sw_params));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_snd_sw_params(target_snd_pcm_sw_params,
+                      snd_pcm_sw_params);
+            }
+        }
+        unlock_user_struct(target_snd_pcm_sw_params, arg, 0);
+        return ret;
+    case SNDRV_PCM_IOCTL_CHANNEL_INFO:
+        if (!lock_user_struct(VERIFY_READ,
+                 target_snd_pcm_channel_info, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        snd_pcm_channel_info = (struct snd_pcm_channel_info *)buf_temp;
+        ret = target_to_host_snd_pcm_channel_info(snd_pcm_channel_info,
+                 target_snd_pcm_channel_info);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, snd_pcm_channel_info));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_snd_pcm_channel_info(
+                      target_snd_pcm_channel_info, snd_pcm_channel_info);
+            }
+        }
+        unlock_user_struct(target_snd_pcm_channel_info, arg, 0);
+        return ret;
+    case SNDRV_PCM_IOCTL_WRITEI_FRAMES:
+    case SNDRV_PCM_IOCTL_READI_FRAMES:
+        if (!lock_user_struct(VERIFY_READ, target_snd_xferi, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        snd_xferi = (struct snd_xferi *)buf_temp;
+        ret = target_to_host_snd_xferi(snd_xferi, target_snd_xferi);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, snd_xferi));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_snd_xferi(target_snd_xferi, snd_xferi);
+            }
+        }
+        unlock_user_struct(target_snd_xferi, arg, 0);
+        return ret;
+
+    }
+    return -TARGET_ENOSYS;
+}
+static inline abi_long target_to_host_mpt3_ioctl_iocinfo(
+                         struct mpt3_ioctl_iocinfo *host_ver,
+         struct target_mpt3_ioctl_iocinfo *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->adapter_type, &target_ver->adapter_type);
+    __get_user(host_ver->port_number, &target_ver->port_number);
+    __get_user(host_ver->pci_id, &target_ver->pci_id);
+    __get_user(host_ver->hw_rev, &target_ver->hw_rev);
+    __get_user(host_ver->subsystem_device, &target_ver->subsystem_device);
+    __get_user(host_ver->subsystem_vendor, &target_ver->subsystem_vendor);
+    __get_user(host_ver->rsvd0, &target_ver->rsvd0);
+    __get_user(host_ver->firmware_version, &target_ver->firmware_version);
+    __get_user(host_ver->bios_version, &target_ver->bios_version);
+    memcpy(host_ver->driver_version, target_ver->driver_version,
+                                  sizeof(target_ver->driver_version));
+    __get_user(host_ver->rsvd1,   &target_ver->rsvd1);
+    __get_user(host_ver->scsi_id, &target_ver->scsi_id);
+    __get_user(host_ver->rsvd2, &target_ver->rsvd2);
+    __get_user(host_ver->pci_information.u.word, &target_ver->pci_information.u.word);
+    __get_user(host_ver->pci_information.segment_id,
+               &target_ver->pci_information.segment_id);
+
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_iocinfo(
+                         struct target_mpt3_ioctl_iocinfo *target_ver,
+         struct mpt3_ioctl_iocinfo *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->adapter_type, &target_ver->adapter_type);
+    __put_user(host_ver->port_number, &target_ver->port_number);
+    __put_user(host_ver->pci_id, &target_ver->pci_id);
+    __put_user(host_ver->hw_rev, &target_ver->hw_rev);
+    __put_user(host_ver->subsystem_device, &target_ver->subsystem_device);
+    __put_user(host_ver->subsystem_vendor, &target_ver->subsystem_vendor);
+    __put_user(host_ver->rsvd0, &target_ver->rsvd0);
+    __put_user(host_ver->firmware_version, &target_ver->firmware_version);
+    __put_user(host_ver->bios_version, &target_ver->bios_version);
+    memcpy(target_ver->driver_version, host_ver->driver_version,
+                                  sizeof(target_ver->driver_version));
+    __put_user(host_ver->rsvd1,   &target_ver->rsvd1);
+    __put_user(host_ver->scsi_id, &target_ver->scsi_id);
+    __put_user(host_ver->rsvd2, &target_ver->rsvd2);
+    __put_user(host_ver->pci_information.u.word, &target_ver->pci_information.u.word);
+    __put_user(host_ver->pci_information.segment_id,
+               &target_ver->pci_information.segment_id);
+
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_command(
+                         struct mpt3_ioctl_command *host_ver,
+         struct target_mpt3_ioctl_command *target_ver)
+{
+    memset(host_ver, 0, sizeof(*host_ver));
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->timeout, &target_ver->timeout);
+    __get_user(host_ver->max_reply_bytes, &target_ver->max_reply_bytes);
+    if (host_ver->max_reply_bytes) {
+        host_ver->reply_frame_buf_ptr = lock_user(VERIFY_READ, target_ver->reply_frame_buf_ptr,
+                                   target_ver->max_reply_bytes, 0);
+        if (!host_ver->reply_frame_buf_ptr) {
+            return -EFAULT;
+        }
+    }
+    __get_user(host_ver->data_in_size, &target_ver->data_in_size);
+    if (host_ver->data_in_size) {
+        host_ver->data_in_buf_ptr = lock_user(VERIFY_READ, target_ver->data_in_buf_ptr,
+                                   target_ver->data_in_size, 0);
+        if (!host_ver->data_in_buf_ptr) {
+            return -EFAULT;
+        }
+    }
+    __get_user(host_ver->data_out_size, &target_ver->data_out_size);
+    if (host_ver->data_out_size) {
+        host_ver->data_out_buf_ptr = lock_user(VERIFY_READ, target_ver->data_out_buf_ptr,
+                                   target_ver->data_out_size, 0);
+        if (!host_ver->data_out_buf_ptr) {
+            return -EFAULT;
+        }
+    }
+    __get_user(host_ver->max_sense_bytes, &target_ver->max_sense_bytes);
+    if (host_ver->max_sense_bytes) {
+        host_ver->sense_data_ptr = lock_user(VERIFY_READ, target_ver->sense_data_ptr,
+                                   target_ver->max_sense_bytes, 0);
+        if (!host_ver->sense_data_ptr) {
+            return -EFAULT;
+        }
+    }
+    __get_user(host_ver->data_sge_offset, &target_ver->data_sge_offset);
+    memcpy(host_ver->mf, target_ver->mf,
+           sizeof(uint32_t) * host_ver->data_sge_offset);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_command(
+                         struct target_mpt3_ioctl_command *target_ver,
+         struct mpt3_ioctl_command *host_ver)
+{
+    uint64_t reply_frame_buf_ptr = (uint64_t)host_ver->reply_frame_buf_ptr;
+    uint64_t data_in_buf_ptr = (uint64_t)host_ver->data_in_buf_ptr;
+    uint64_t data_out_buf_ptr = (uint64_t)host_ver->data_out_buf_ptr;
+    uint64_t sense_data_ptr = (uint64_t)host_ver->sense_data_ptr;
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->timeout, &target_ver->timeout);
+    __put_user(reply_frame_buf_ptr, &target_ver->reply_frame_buf_ptr);
+    __put_user(data_in_buf_ptr, &target_ver->data_in_buf_ptr);
+    __put_user(data_out_buf_ptr, &target_ver->data_out_buf_ptr);
+    __put_user(sense_data_ptr, &target_ver->sense_data_ptr);
+    __put_user(host_ver->max_reply_bytes, &target_ver->max_reply_bytes);
+    __put_user(host_ver->data_in_size, &target_ver->data_in_size);
+    __put_user(host_ver->data_out_size, &target_ver->data_out_size);
+    __put_user(host_ver->max_sense_bytes, &target_ver->max_sense_bytes);
+    __put_user(host_ver->data_sge_offset, &target_ver->data_sge_offset);
+    memcpy(target_ver->mf, host_ver->mf,
+           sizeof(uint32_t) * host_ver->data_sge_offset);
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_eventquery(
+                         struct mpt3_ioctl_eventquery *host_ver,
+         struct target_mpt3_ioctl_eventquery *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->event_entries, &target_ver->event_entries);
+    __get_user(host_ver->rsvd, &target_ver->rsvd);
+    memcpy(host_ver->event_types,
+           target_ver->event_types, sizeof(target_ver->event_types));
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_eventquery(
+                         struct target_mpt3_ioctl_eventquery *target_ver,
+         struct mpt3_ioctl_eventquery *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->event_entries, &target_ver->event_entries);
+    __put_user(host_ver->rsvd, &target_ver->rsvd);
+    memcpy(target_ver->event_types,
+           host_ver->event_types, sizeof(target_ver->event_types));
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_eventenable(
+                         struct mpt3_ioctl_eventenable *host_ver,
+         struct target_mpt3_ioctl_eventenable *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    memcpy(host_ver->event_types,
+           target_ver->event_types, sizeof(target_ver->event_types));
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_eventenable(
+                         struct target_mpt3_ioctl_eventenable *target_ver,
+         struct mpt3_ioctl_eventenable *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    memcpy(target_ver->event_types,
+           host_ver->event_types, sizeof(target_ver->event_types));
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_eventreport(
+                         struct mpt3_ioctl_eventreport *host_ver,
+         struct target_mpt3_ioctl_eventreport *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    abi_ulong number_bytes = host_ver->hdr.max_data_size -
+                            sizeof(struct mpt3_ioctl_header);
+    abi_ulong max_events = number_bytes/sizeof(struct MPT3_IOCTL_EVENTS);
+    abi_ulong max = MPT3SAS_CTL_EVENT_LOG_SIZE < max_events ?
+                    MPT3SAS_CTL_EVENT_LOG_SIZE : max_events;
+    memcpy(host_ver->event_data, target_ver->event_data,
+            sizeof(struct MPT3_IOCTL_EVENTS) * max);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_eventreport(
+                         struct target_mpt3_ioctl_eventreport *target_ver,
+         struct mpt3_ioctl_eventreport *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    abi_ulong number_bytes = host_ver->hdr.max_data_size -
+                            sizeof(struct mpt3_ioctl_header);
+    abi_ulong max_events = number_bytes/sizeof(struct MPT3_IOCTL_EVENTS);
+    abi_ulong max = MPT3SAS_CTL_EVENT_LOG_SIZE < max_events ?
+                    MPT3SAS_CTL_EVENT_LOG_SIZE : max_events;
+    memcpy(target_ver->event_data, host_ver->event_data,
+            sizeof(target_ver->event_data) * max);
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_diag_reset(
+                         struct mpt3_ioctl_diag_reset *host_ver,
+         struct target_mpt3_ioctl_diag_reset *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_diag_reset(
+                         struct target_mpt3_ioctl_diag_reset *target_ver,
+         struct mpt3_ioctl_diag_reset *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+}
+
+static inline abi_long target_to_host_mpt3_ioctl_btdh_mapping(
+                         struct mpt3_ioctl_btdh_mapping *host_ver,
+         struct target_mpt3_ioctl_btdh_mapping *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->id, &target_ver->id);
+    __get_user(host_ver->bus, &target_ver->bus);
+    __get_user(host_ver->handle, &target_ver->handle);
+    __get_user(host_ver->rsvd, &target_ver->rsvd);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_ioctl_btdh_mapping(
+                         struct target_mpt3_ioctl_btdh_mapping *target_ver,
+         struct mpt3_ioctl_btdh_mapping *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->id, &target_ver->id);
+    __put_user(host_ver->bus, &target_ver->bus);
+    __put_user(host_ver->handle, &target_ver->handle);
+    __put_user(host_ver->rsvd, &target_ver->rsvd);
+}
+
+static inline abi_long target_to_host_mpt3_diag_register(
+                         struct mpt3_diag_register *host_ver,
+         struct target_mpt3_diag_register *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->reserved, &target_ver->reserved);
+    __get_user(host_ver->buffer_type, &target_ver->buffer_type);
+    __get_user(host_ver->application_flags, &target_ver->application_flags);
+    __get_user(host_ver->diagnostic_flags, &target_ver->diagnostic_flags);
+    memcpy(host_ver->product_specific,
+           target_ver->product_specific, sizeof(target_ver->product_specific));
+    __get_user(host_ver->requested_buffer_size, &target_ver->requested_buffer_size);
+    __get_user(host_ver->unique_id, &target_ver->unique_id);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_diag_register(
+                         struct target_mpt3_diag_register *target_ver,
+         struct mpt3_diag_register *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->reserved, &target_ver->reserved);
+    __put_user(host_ver->buffer_type, &target_ver->buffer_type);
+    __put_user(host_ver->application_flags, &target_ver->application_flags);
+    __put_user(host_ver->diagnostic_flags, &target_ver->diagnostic_flags);
+    memcpy(target_ver->product_specific,
+           host_ver->product_specific, sizeof(target_ver->product_specific));
+    __put_user(host_ver->requested_buffer_size, &target_ver->requested_buffer_size);
+    __put_user(host_ver->unique_id, &target_ver->unique_id);
+}
+
+static inline abi_long target_to_host_mpt3_diag_release(
+                         struct mpt3_diag_release *host_ver,
+         struct target_mpt3_diag_release *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->unique_id, &target_ver->unique_id);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_diag_release(
+                         struct target_mpt3_diag_release *target_ver,
+         struct mpt3_diag_release *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->unique_id, &target_ver->unique_id);
+}
+
+static inline abi_long target_to_host_mpt3_diag_unregister(
+                         struct mpt3_diag_unregister *host_ver,
+         struct target_mpt3_diag_unregister *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->unique_id, &target_ver->unique_id);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_diag_unregister(
+                         struct target_mpt3_diag_unregister *target_ver,
+         struct mpt3_diag_unregister *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->unique_id, &target_ver->unique_id);
+}
+
+static inline abi_long target_to_host_mpt3_diag_query(
+                         struct mpt3_diag_query *host_ver,
+         struct target_mpt3_diag_query *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->reserved, &target_ver->reserved);
+    __get_user(host_ver->buffer_type, &target_ver->buffer_type);
+    __get_user(host_ver->application_flags, &target_ver->application_flags);
+    __get_user(host_ver->diagnostic_flags, &target_ver->diagnostic_flags);
+    memcpy(host_ver->product_specific,
+           target_ver->product_specific, sizeof(target_ver->product_specific));
+
+    __get_user(host_ver->total_buffer_size, &target_ver->total_buffer_size);
+    __get_user(host_ver->driver_added_buffer_size, &target_ver->driver_added_buffer_size);
+    __get_user(host_ver->unique_id, &target_ver->unique_id);
+    return 0;
+}
+
+static inline void host_to_target_mpt3_diag_query(
+                         struct target_mpt3_diag_query *target_ver,
+         struct mpt3_diag_query *host_ver)
+{
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->reserved, &target_ver->reserved);
+    __put_user(host_ver->buffer_type, &target_ver->buffer_type);
+    __put_user(host_ver->application_flags, &target_ver->application_flags);
+    __put_user(host_ver->diagnostic_flags, &target_ver->diagnostic_flags);
+    memcpy(target_ver->product_specific,
+           host_ver->product_specific, sizeof(target_ver->product_specific));
+    __put_user(host_ver->total_buffer_size, &target_ver->total_buffer_size);
+    __put_user(host_ver->driver_added_buffer_size, &target_ver->driver_added_buffer_size);
+    __put_user(host_ver->unique_id, &target_ver->unique_id);
+}
+
+static inline abi_long target_to_host_mpt3_diag_read_buffer(
+                         struct mpt3_diag_read_buffer *host_ver,
+         struct target_mpt3_diag_read_buffer *target_ver)
+{
+    __get_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __get_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __get_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __get_user(host_ver->status, &target_ver->status);
+    __get_user(host_ver->reserved, &target_ver->reserved);
+    __get_user(host_ver->flags, &target_ver->flags);
+    __get_user(host_ver->starting_offset, &target_ver->starting_offset);
+    __get_user(host_ver->bytes_to_read, &target_ver->bytes_to_read);
+    __get_user(host_ver->unique_id, &target_ver->unique_id);
+    memcpy(host_ver->diagnostic_data,
+           target_ver->diagnostic_data, sizeof(target_ver->diagnostic_data));
+    return 0;
+}
+
+static inline void host_to_target_mpt3_diag_read_buffer(
+                         struct target_mpt3_diag_read_buffer *target_ver,
+         struct mpt3_diag_read_buffer *host_ver)
+{
+    size_t bytes_to_read;
+    __put_user(host_ver->hdr.ioc_number, &target_ver->hdr.ioc_number);
+    __put_user(host_ver->hdr.port_number, &target_ver->hdr.port_number);
+    __put_user(host_ver->hdr.max_data_size, &target_ver->hdr.max_data_size);
+    __put_user(host_ver->status, &target_ver->status);
+    __put_user(host_ver->reserved, &target_ver->reserved);
+    __put_user(host_ver->flags, &target_ver->flags);
+    __put_user(host_ver->starting_offset, &target_ver->starting_offset);
+    __put_user(host_ver->bytes_to_read, &target_ver->bytes_to_read);
+    __put_user(host_ver->unique_id, &target_ver->unique_id);
+    bytes_to_read = host_ver->bytes_to_read / sizeof(uint32_t) * sizeof(uint32_t);
+    if (host_ver->bytes_to_read % sizeof(uint32_t) != 0) {
+        bytes_to_read += sizeof(uint32_t);
+    }
+    memcpy(target_ver->diagnostic_data, host_ver->diagnostic_data, bytes_to_read);
+}
+
+static abi_long do_ioctl_mpt3(const IOCTLEntry *ie,
+                             uint8_t *buf_temp,
+                             int fd, int cmd, abi_long arg)
+{
+    abi_long ret;
+    struct target_mpt3_ioctl_iocinfo *target_mpt3_ioctl_iocinfo;
+    struct target_mpt3_ioctl_command *target_mpt3_ioctl_command;
+    struct target_mpt3_ioctl_eventquery *target_mpt3_ioctl_eventquery;
+    struct target_mpt3_ioctl_eventenable *target_mpt3_ioctl_eventenable;
+    struct target_mpt3_ioctl_eventreport *target_mpt3_ioctl_eventreport;
+    struct target_mpt3_ioctl_diag_reset *target_mpt3_ioctl_diag_reset;
+    struct target_mpt3_ioctl_btdh_mapping *target_mpt3_ioctl_btdh_mapping;
+    struct target_mpt3_diag_register *target_mpt3_diag_register;
+    struct target_mpt3_diag_release *target_mpt3_diag_release;
+    struct target_mpt3_diag_unregister *target_mpt3_diag_unregister;
+    struct target_mpt3_diag_query *target_mpt3_diag_query;
+    struct target_mpt3_diag_read_buffer *target_mpt3_diag_read_buffer;
+
+    struct mpt3_ioctl_iocinfo *mpt3_ioctl_iocinfo;
+    struct mpt3_ioctl_command *mpt3_ioctl_command;
+    struct mpt3_ioctl_eventquery *mpt3_ioctl_eventquery;
+    struct mpt3_ioctl_eventenable *mpt3_ioctl_eventenable;
+    struct mpt3_ioctl_eventreport *mpt3_ioctl_eventreport;
+    struct mpt3_ioctl_diag_reset *mpt3_ioctl_diag_reset;
+    struct mpt3_ioctl_btdh_mapping *mpt3_ioctl_btdh_mapping;
+    struct mpt3_diag_register *mpt3_diag_register;
+    struct mpt3_diag_release *mpt3_diag_release;
+    struct mpt3_diag_unregister *mpt3_diag_unregister;
+    struct mpt3_diag_query *mpt3_diag_query;
+    struct mpt3_diag_read_buffer *mpt3_diag_read_buffer;
+
+    switch (ie->host_cmd) {
+    case MPT3IOCINFO:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_iocinfo, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_iocinfo = (struct mpt3_ioctl_iocinfo *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_iocinfo(mpt3_ioctl_iocinfo,
+                                                target_mpt3_ioctl_iocinfo);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_iocinfo));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_iocinfo(target_mpt3_ioctl_iocinfo,
+                                                  mpt3_ioctl_iocinfo);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_iocinfo, arg, 0);
+        return ret;
+    case MPT3COMMAND:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_command, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_command = (struct mpt3_ioctl_command *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_command(mpt3_ioctl_command,
+                                                target_mpt3_ioctl_command);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_command));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_command(target_mpt3_ioctl_command,
+                                                  mpt3_ioctl_command);
+            }
+        }
+        unlock_user(mpt3_ioctl_command->reply_frame_buf_ptr, target_mpt3_ioctl_command->reply_frame_buf_ptr, 0);
+        unlock_user(mpt3_ioctl_command->data_in_buf_ptr, target_mpt3_ioctl_command->data_in_buf_ptr, 0);
+        unlock_user(mpt3_ioctl_command->data_out_buf_ptr, target_mpt3_ioctl_command->data_out_buf_ptr, 0);
+        unlock_user(mpt3_ioctl_command->sense_data_ptr, target_mpt3_ioctl_command->sense_data_ptr, 0);
+        unlock_user_struct(target_mpt3_ioctl_command, arg, 0);
+        return ret;
+    case MPT3EVENTQUERY:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_eventquery, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_eventquery = (struct mpt3_ioctl_eventquery *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_eventquery(mpt3_ioctl_eventquery,
+                                                   target_mpt3_ioctl_eventquery);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_eventquery));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_eventquery(target_mpt3_ioctl_eventquery,
+                                                     mpt3_ioctl_eventquery);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_eventquery, arg, 0);
+        return ret;
+    case MPT3EVENTENABLE:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_eventenable, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_eventenable = (struct mpt3_ioctl_eventenable *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_eventenable(mpt3_ioctl_eventenable,
+                                                    target_mpt3_ioctl_eventenable);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_eventenable));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_eventenable(target_mpt3_ioctl_eventenable,
+                                                      mpt3_ioctl_eventenable);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_eventenable, arg, 0);
+        return ret;
+    case MPT3EVENTREPORT:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_eventreport, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_eventreport = g_malloc(MPT3SAS_CTL_EVENT_LOG_SIZE *
+                                        sizeof(struct MPT3_IOCTL_EVENTS) +
+                                        sizeof(struct mpt3_ioctl_header));
+        ret = target_to_host_mpt3_ioctl_eventreport(mpt3_ioctl_eventreport,
+                                                    target_mpt3_ioctl_eventreport);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_eventreport));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_eventreport(target_mpt3_ioctl_eventreport,
+                                                      mpt3_ioctl_eventreport);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_eventreport, arg, 0);
+        g_free(mpt3_ioctl_eventreport);
+        return ret;
+    case MPT3HARDRESET:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_diag_reset, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_diag_reset = (struct mpt3_ioctl_diag_reset *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_diag_reset(mpt3_ioctl_diag_reset,
+                                                   target_mpt3_ioctl_diag_reset);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_diag_reset));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_diag_reset(target_mpt3_ioctl_diag_reset,
+                                                     mpt3_ioctl_diag_reset);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_diag_reset, arg, 0);
+        return ret;
+    case MPT3BTDHMAPPING:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_ioctl_btdh_mapping, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_ioctl_btdh_mapping = (struct mpt3_ioctl_btdh_mapping *)buf_temp;
+        ret = target_to_host_mpt3_ioctl_btdh_mapping(mpt3_ioctl_btdh_mapping,
+                                                     target_mpt3_ioctl_btdh_mapping);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_ioctl_btdh_mapping));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_ioctl_btdh_mapping(target_mpt3_ioctl_btdh_mapping,
+                                                       mpt3_ioctl_btdh_mapping);
+            }
+        }
+        unlock_user_struct(target_mpt3_ioctl_btdh_mapping, arg, 0);
+        return ret;
+    case MPT3DIAGREGISTER:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_diag_register, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_diag_register = (struct mpt3_diag_register *)buf_temp;
+        ret = target_to_host_mpt3_diag_register(mpt3_diag_register,
+                                                target_mpt3_diag_register);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_diag_register));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_diag_register(target_mpt3_diag_register,
+                                                  mpt3_diag_register);
+            }
+        }
+        unlock_user_struct(target_mpt3_diag_register, arg, 0);
+        return ret;
+    case MPT3DIAGRELEASE:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_diag_release, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_diag_release = (struct mpt3_diag_release *)buf_temp;
+        ret = target_to_host_mpt3_diag_release(mpt3_diag_release,
+                                               target_mpt3_diag_release);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_diag_release));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_diag_release(target_mpt3_diag_release,
+                                                 mpt3_diag_release);
+            }
+        }
+        unlock_user_struct(target_mpt3_diag_release, arg, 0);
+        return ret;
+    case MPT3DIAGUNREGISTER:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_diag_unregister, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_diag_unregister = (struct mpt3_diag_unregister *)buf_temp;
+        ret = target_to_host_mpt3_diag_unregister(mpt3_diag_unregister,
+                                                  target_mpt3_diag_unregister);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_diag_unregister));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_diag_unregister(target_mpt3_diag_unregister,
+                                                    mpt3_diag_unregister);
+            }
+        }
+        unlock_user_struct(target_mpt3_diag_unregister, arg, 0);
+        return ret;
+    case MPT3DIAGQUERY:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_diag_query, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_diag_query = (struct mpt3_diag_query *)buf_temp;
+        ret = target_to_host_mpt3_diag_query(mpt3_diag_query,
+                                             target_mpt3_diag_query);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_diag_query));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_diag_query(target_mpt3_diag_query,
+                                               mpt3_diag_query);
+            }
+        }
+        unlock_user_struct(target_mpt3_diag_query, arg, 0);
+        return ret;
+    case MPT3DIAGREADBUFFER:
+        if (!lock_user_struct(VERIFY_READ, target_mpt3_diag_read_buffer, arg, 0)) {
+            return -TARGET_EFAULT;
+        }
+        mpt3_diag_read_buffer = (struct mpt3_diag_read_buffer *)buf_temp;
+        ret = target_to_host_mpt3_diag_read_buffer(mpt3_diag_read_buffer,
+                                                   target_mpt3_diag_read_buffer);
+        if (!is_error(ret)) {
+            ret = get_errno(safe_ioctl(fd, ie->host_cmd, mpt3_diag_read_buffer));
+            if (is_error(ret)) {
+                    /* do nothing */
+            } else {
+                host_to_target_mpt3_diag_read_buffer(target_mpt3_diag_read_buffer,
+                                                     mpt3_diag_read_buffer);
+            }
+        }
+        unlock_user_struct(target_mpt3_diag_read_buffer, arg, 0);
+        return ret;
+    }
+    return -TARGET_ENOSYS;
+}
+
+#include "ioctl/ioctl_syscall/syscall_amdgpu_drm.c"
+
+typedef __u32 u32;
+typedef __u64 u64;
+
 IOCTLEntry ioctl_entries[] = {
 #define IOCTL(cmd, access, ...) \
     { TARGET_ ## cmd, cmd, #cmd, access, 0, {  __VA_ARGS__ } },
@@ -5790,10 +8118,14 @@ IOCTLEntry ioctl_entries[] = {
 #include "ioctls.h"
     { 0, 0, },
 };
+int ioctl_cache[256];
+#ifdef TARGET_X86_64
+int ioctl_cache_unsupported_cmd [256];
+#endif
 
 /* ??? Implement proper locking for ioctls.  */
 /* do_ioctl() Must return target values and target errnos. */
-static abi_long do_ioctl(int fd, int cmd, abi_long arg)
+static abi_long do_ioctl(int fd, int cmd, abi_ulong arg)
 {
     const IOCTLEntry *ie;
     const argtype *arg_type;
@@ -5801,18 +8133,43 @@ static abi_long do_ioctl(int fd, int cmd, abi_long arg)
     uint8_t buf_temp[MAX_STRUCT_SIZE];
     int target_size;
     void *argptr;
+    int i;
+    int hash = (cmd & 0xff) ^ ((cmd & 0xff00) >> 8);
 
     ie = ioctl_entries;
-    for(;;) {
-        if (ie->target_cmd == 0) {
-            qemu_log_mask(
-                LOG_UNIMP, "Unsupported ioctl: cmd=0x%04lx\n", (long)cmd);
-            return -TARGET_ENOSYS;
-        }
-        if (ie->target_cmd == cmd)
-            break;
-        ie++;
+    int ioctl_cache_val = ioctl_cache[hash];
+    ie += ioctl_cache_val;
+
+#ifdef TARGET_X86_64
+    if (ioctl_cache_unsupported_cmd[hash] == cmd) {
+        ret = get_errno(safe_ioctl(fd, cmd, arg));
+        return ret;
     }
+#endif
+    /* slow path to iterate the ioctl_entries */
+    if (ie->target_cmd != cmd) {
+        ie = ioctl_entries;
+        for (i = 0; ; i++) {
+            if (ie->target_cmd == 0) {
+#ifdef TARGET_X86_64
+                ioctl_cache_unsupported_cmd[hash] = cmd;
+                ret = get_errno(safe_ioctl(fd, cmd, arg));
+                return ret;
+#else
+                return -TARGET_ENOSYS;
+#endif
+            }
+            if (ie->target_cmd == cmd) {
+                ioctl_cache[hash] = i;
+#ifdef TARGET_X86_64
+                ioctl_cache_unsupported_cmd[hash] = 0;
+#endif
+                break;
+            }
+            ie++;
+        }
+    }
+
     arg_type = ie->arg_type;
     if (ie->do_ioctl) {
         return ie->do_ioctl(ie, buf_temp, fd, cmd, arg);
@@ -6078,10 +8435,16 @@ static bitmask_transtbl mmap_flags_tbl[] = {
     { TARGET_MAP_NORESERVE, TARGET_MAP_NORESERVE,
       MAP_NORESERVE, MAP_NORESERVE },
     { TARGET_MAP_HUGETLB, TARGET_MAP_HUGETLB, MAP_HUGETLB, MAP_HUGETLB },
+#ifdef TARGET_X86_64
+    { X86_64_MAP_32BIT, X86_64_MAP_32BIT, X86_64_MAP_32BIT, X86_64_MAP_32BIT },
+#endif
     /* MAP_STACK had been ignored by the kernel for quite some time.
        Recognize it for the target insofar as we do not want to pass
        it through to the host.  */
     { TARGET_MAP_STACK, TARGET_MAP_STACK, 0, 0 },
+    { TARGET_MAP_SHARED_VALIDATE, TARGET_MAP_SHARED_VALIDATE, MAP_SHARED_VALIDATE, MAP_SHARED_VALIDATE },
+    { TARGET_MAP_HUGE_2MB, TARGET_MAP_HUGE_2MB, MAP_HUGE_2MB, MAP_HUGE_2MB },
+    { TARGET_MAP_HUGE_1GB, TARGET_MAP_HUGE_1GB, MAP_HUGE_1GB, MAP_HUGE_1GB },
     { 0, 0, 0, 0 }
 };
 
@@ -6157,7 +8520,7 @@ static abi_long write_ldt(CPUX86State *env,
         env->ldt.base = target_mmap(0,
                                     TARGET_LDT_ENTRIES * TARGET_LDT_ENTRY_SIZE,
                                     PROT_READ|PROT_WRITE,
-                                    MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+                                    MAP_ANONYMOUS|MAP_PRIVATE, -1, 0, 0);
         if (env->ldt.base == -1)
             return -TARGET_ENOMEM;
         memset(g2h_untagged(env->ldt.base), 0,
@@ -6257,7 +8620,7 @@ abi_long do_set_thread_area(CPUX86State *env, abi_ulong ptr)
     }
     unlock_user_struct(target_ldt_info, ptr, 1);
 
-    if (ldt_info.entry_number < TARGET_GDT_ENTRY_TLS_MIN || 
+    if (ldt_info.entry_number < TARGET_GDT_ENTRY_TLS_MIN ||
         ldt_info.entry_number > TARGET_GDT_ENTRY_TLS_MAX)
            return -TARGET_EINVAL;
     seg_32bit = ldt_info.flags & 1;
@@ -6335,7 +8698,7 @@ static abi_long do_get_thread_area(CPUX86State *env, abi_ulong ptr)
     lp = (uint32_t *)(gdt_table + idx);
     entry_1 = tswap32(lp[0]);
     entry_2 = tswap32(lp[1]);
-    
+
     read_exec_only = ((entry_2 >> 9) & 1) ^ 1;
     contents = (entry_2 >> 10) & 3;
     seg_not_present = ((entry_2 >> 15) & 1) ^ 1;
@@ -6351,8 +8714,8 @@ static abi_long do_get_thread_area(CPUX86State *env, abi_ulong ptr)
         (read_exec_only << 3) | (limit_in_pages << 4) |
         (seg_not_present << 5) | (useable << 6) | (lm << 7);
     limit = (entry_1 & 0xffff) | (entry_2  & 0xf0000);
-    base_addr = (entry_1 >> 16) | 
-        (entry_2 & 0xff000000) | 
+    base_addr = (entry_1 >> 16) |
+        (entry_2 & 0xff000000) |
         ((entry_2 & 0xff) << 16);
     target_ldt_info->base_addr = tswapal(base_addr);
     target_ldt_info->limit = tswap32(limit);
@@ -6437,6 +8800,9 @@ static void *clone_func(void *arg)
     if (info->parent_tidptr)
         put_user_u32(info->tid, info->parent_tidptr);
     qemu_guest_random_seed_thread_part2(cpu->random_seed);
+#ifdef CONFIG_LATX
+    latx_lsenv_init(env);
+#endif
     /* Enable signals.  */
     sigprocmask(SIG_SETMASK, &info->sigmask, NULL);
     /* Signal to the parent that we're ready.  */
@@ -6491,9 +8857,14 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
          * generate code for parallel execution and flush old translations.
          * Do this now so that the copy gets CF_PARALLEL too.
          */
-        if (!(cpu->tcg_cflags & CF_PARALLEL)) {
+        if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
             cpu->tcg_cflags |= CF_PARALLEL;
             tb_flush(cpu);
+#ifdef CONFIG_LATX
+            if (!close_latx_parallel) {
+                latx_fast_jmp_cache_free(env);
+            }
+#endif
         }
 
         /* we create a new CPU instance. */
@@ -6559,9 +8930,11 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         }
 
         /* We can't support custom termination signals */
+        /* We don't support child exit with no SIGCHLD sent
         if ((flags & CSIGNAL) != TARGET_SIGCHLD) {
             return -TARGET_EINVAL;
         }
+        */
 
         if (block_signals()) {
             return -TARGET_ERESTARTSYS;
@@ -6682,6 +9055,11 @@ static int target_to_host_fcntl_cmd(int cmd)
         break;
     case TARGET_F_GET_SEALS:
         ret = F_GET_SEALS;
+        break;
+#endif
+#ifdef F_CANCELLK
+    case TARGET_F_CANCELLK:
+        ret = F_CANCELLK;
         break;
 #endif
     default:
@@ -7127,10 +9505,11 @@ void syscall_init(void)
 
         /* automatic consistency check if same arch */
 #if (defined(__i386__) && defined(TARGET_I386) && defined(TARGET_ABI32)) || \
-    (defined(__x86_64__) && defined(TARGET_X86_64))
+    (defined(__x86_64__) && defined(TARGET_X86_64)) || \
+    (defined(CONFIG_LATX_DEBUG) && defined(TARGET_X86_64))
         if (unlikely(ie->target_cmd != ie->host_cmd)) {
-            fprintf(stderr, "ERROR: ioctl(%s): target=0x%x host=0x%x\n",
-                    ie->name, ie->target_cmd, ie->host_cmd);
+            /* fprintf(stderr, "ERROR: ioctl(%s): target=0x%x host=0x%x\n", */
+            /*         ie->name, ie->target_cmd, ie->host_cmd); */
         }
 #endif
         ie++;
@@ -7638,9 +10017,27 @@ static int do_futex(CPUState *cpu, target_ulong uaddr, int op, int val,
         }
         return do_safe_futex(g2h(cpu, uaddr),
                              op, tswap32(val), pts, NULL, val3);
+#ifdef TARGET_X86_64
+    case FUTEX_LOCK_PI:
+        if (timeout) {
+            pts = &ts;
+            target_to_host_timespec(pts, timeout);
+        } else {
+            pts = NULL;
+        }
+        return do_safe_futex(g2h(cpu, uaddr), op, val, pts, NULL, 0);
+#endif
+    /* wine use FUTEX_WAKE_BITSET, so we need support FUTEX_WAKE_BITSET */
+    case FUTEX_WAKE_BITSET:
     case FUTEX_WAKE:
         return do_safe_futex(g2h(cpu, uaddr),
-                             op, val, NULL, NULL, 0);
+                             op, val, NULL, NULL, val3);
+#ifdef TARGET_X86_64
+    case FUTEX_TRYLOCK_PI:
+    case FUTEX_UNLOCK_PI:
+        return do_safe_futex(g2h(cpu, uaddr),
+                             op, val, NULL, NULL, val3);
+#endif
     case FUTEX_FD:
         return do_safe_futex(g2h(cpu, uaddr),
                              op, val, NULL, NULL, 0);
@@ -7690,8 +10087,26 @@ static int do_futex_time64(CPUState *cpu, target_ulong uaddr, int op,
         }
         return do_safe_futex(g2h(cpu, uaddr), op,
                              tswap32(val), pts, NULL, val3);
+#ifdef TARGET_X86_64
+    case FUTEX_LOCK_PI:
+        if (timeout) {
+            pts = &ts;
+            target_to_host_timespec(pts, timeout);
+        } else {
+            pts = NULL;
+        }
+        return do_safe_futex(g2h(cpu, uaddr), op, val, pts, NULL, 0);
+#endif
+    /* wine use FUTEX_WAKE_BITSET, so we need support FUTEX_WAKE_BITSET */
+    case FUTEX_WAKE_BITSET:
     case FUTEX_WAKE:
         return do_safe_futex(g2h(cpu, uaddr), op, val, NULL, NULL, 0);
+#ifdef TARGET_X86_64
+    case FUTEX_TRYLOCK_PI:
+    case FUTEX_UNLOCK_PI:
+        return do_safe_futex(g2h(cpu, uaddr),
+                             op, val, NULL, NULL, val3);
+#endif
     case FUTEX_FD:
         return do_safe_futex(g2h(cpu, uaddr), op, val, NULL, NULL, 0);
     case FUTEX_REQUEUE:
@@ -7845,44 +10260,416 @@ int host_to_target_waitstatus(int status)
     return status;
 }
 
-static int open_self_cmdline(void *cpu_env, int fd)
+/*
+ * Once setproctitle called, the argv should be reinterpted as the name
+ * set by setproctitle
+ */
+static int open_self_cmdline(void *cpu_env, int fd, const char *oldpath)
 {
     CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
     struct linux_binprm *bprm = ((TaskState *)cpu->opaque)->bprm;
-    int i;
+    struct image_info *info = ((TaskState *)cpu->opaque)->info;
+    static bool setproctitle_called;
 
-    for (i = 0; i < bprm->argc; i++) {
-        size_t len = strlen(bprm->argv[i]) + 1;
+    char argv_last_byte = *(char *)(unsigned long)(info->env_strings - 1);
+    if (argv_last_byte) {
+        setproctitle_called = true;
+    }
 
-        if (write(fd, bprm->argv[i], len) != len) {
+    if (setproctitle_called) {
+        size_t len = strlen((char *)(unsigned long)info->arg_strings) + 1;
+        if (write(fd, (char *)(unsigned long)info->arg_strings, len) != len) {
             return -1;
+        }
+    } else {
+        int i;
+        for (i = 0; i < bprm->argc; i++) {
+            size_t len = strlen(bprm->argv[i]) + 1;
+
+            if (write(fd, bprm->argv[i], len) != len) {
+                return -1;
+            }
         }
     }
 
     return 0;
 }
+static char * get_key_value_from_file(const char * key, char * real_path)
+{
+    char buf[PATH_MAX];
+    char key_value_str[PATH_MAX];
+    snprintf(key_value_str, PATH_MAX - 1, "%s %%s", key);
+    FILE *f = fopen(real_path, "r");
+    char value [PATH_MAX];
+    if(!f)
+        return NULL;
+    while(!feof(f)) {
+        char* ret = fgets(buf, sizeof(buf), f);
+        (void)ret;
+        if (ret) {
+            if (sscanf(buf, key_value_str, &value) == 1) {
+                fclose(f);
+                char *rvalue = malloc(strlen(value) + 1);
+                strcpy(rvalue, value);
+                return rvalue;
+            }
+        }
+    }
+    fclose(f);
+    return NULL;
+}
 
-static int open_self_maps(void *cpu_env, int fd)
+static char* get_latx_binfmtinterpreter(void)
+{
+    char *is_indocker = getenv("LATX_DOCKER");
+    const char *binfmt_path = "/proc/sys/fs/binfmt_misc/";
+    if (is_indocker) {
+        binfmt_path = "/binfmt_misc/";
+    }
+#if defined(TARGET_X86_64)
+    const char * magic = "7f454c4602";
+#else
+    const char * magic = "7f454c4601";
+#endif
+    char tmpstr [PATH_MAX];
+    DIR *dir = opendir(binfmt_path);
+    if (dir == NULL) {
+       lsassertm(0, "dir %s not exist\n", binfmt_path);
+       return NULL;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if(entry->d_type == DT_DIR || !strcmp(entry->d_name, "register")  || !strcmp(entry->d_name, "status")) {
+            continue;
+        }
+        snprintf(tmpstr, PATH_MAX - 1, "%s%s", binfmt_path, entry->d_name);
+        char * value = get_key_value_from_file("magic", tmpstr);
+        if (value) {
+            if(!strncmp(value, magic, strlen(magic))) {
+                value = get_key_value_from_file("interpreter", tmpstr);
+                lsassert(value);
+                return value;
+            }
+            free(value);
+        }
+    }
+    fprintf(stderr, "fixme:%s:latx cannot find %sXX\n", binfmt_path, __func__);
+    return NULL;
+}
+static int open_other_cmdline(void *cpu_env, int fd, const char *oldpath)
+{
+    char buf[PATH_MAX] = {0};
+    int argc_max = 100;
+    char **argv = malloc(argc_max*sizeof(void *));
+    int argc = 0;
+    static char* latx_binfmtinterpreter = NULL;
+    int ret = 0;
+    int cpy_offset = 0;
+    if (!latx_binfmtinterpreter) {
+        latx_binfmtinterpreter = get_latx_binfmtinterpreter();
+    }
+    FILE *f = fopen(oldpath, "r");
+    lsassertm(f, "can open %s", oldpath);
+    if(!f) {
+        free(argv);
+        return -1;
+    }
+    size_t f_offset = 0;
+    while(!feof(f)) {
+        size_t ret = fread(buf, 1, sizeof(buf), f);
+        if (ret == 0 && !strlen(buf)&&feof(f)) {// /proc/%d/cmdline is nil
+            return 0;
+        }
+        if (ret > 0) {
+            int len = strlen(buf);
+            argv[argc] = malloc(len + 1);
+            argv[argc][len] = '\0';
+            strcpy(argv[argc], buf);
+            argc++;
+            if (unlikely(argc>argc_max)) {
+                argc_max += 100;
+                argv = realloc(argv, argc_max*sizeof(void *));
+            }
+            if (len == ret - 1) {
+                break;
+            }
+            f_offset += len + 1;
+            fseek(f, f_offset, SEEK_SET);
+        }
+    }
+    fclose(f);
+    if (argc <= 0) {
+        free(argv);
+        return -1;
+    }
+    if (argc >= 5 && !strcmp(argv[1], argv[2])) {
+        long long hash = 0;
+        for (int i = 4; i < argc; ++i) {
+            for (int j = 0; argv[i][j] != '\0'; ++j) {
+                hash += argv[i][j];
+            }
+        }
+        if (hash == atoll(argv[3])) {
+            for (int i = 4; i < argc; i++) {
+                int len = strlen(argv[i]);
+                len++;
+                if (write(fd, argv[i], len) != len) {
+                    lsassert(0);
+                    ret = -1;
+                    goto out;
+                }
+            }
+            ret = 0;
+            goto out;
+        }
+    }
+    if (!strcmp(argv[0], latx_binfmtinterpreter)) {
+        cpy_offset = 1;
+    }
+    for (int i = cpy_offset; i < argc; i++) {
+        int len = strlen(argv[i]);
+        len++;
+        if (write(fd, argv[i], len) != len) {
+            lsassert(0);
+            ret = -1;
+            goto out;
+        }
+    }
+    ret = 0;
+out:
+    for (int i = 0;i<argc ; i++) {
+        free(argv[i]);
+    }
+    free(argv);
+    return ret;
+}
+
+struct open_self_maps_data {
+    TaskState *ts;
+    IntervalTreeRoot *host_maps;
+    int fd;
+    bool smaps;
+};
+
+/*
+ * Subroutine to output one line of /proc/self/maps,
+ * or one region of /proc/self/smaps.
+ */
+
+#ifdef TARGET_HPPA
+# define test_stack(S, E, L)  (E == L)
+#else
+# define test_stack(S, E, L)  (S == L)
+#endif
+
+static void open_self_maps_4(const struct open_self_maps_data *d,
+                             const MapInfo *mi, abi_ptr start,
+                             abi_ptr end, unsigned flags)
+{
+    const struct image_info *info = d->ts->info;
+    const char *path = mi->path;
+    uint64_t offset;
+    int fd = d->fd;
+    int count;
+
+    if (test_stack(start, end, info->stack_limit)) {
+        path = "[stack]";
+    } else if (start == info->brk) {
+        path = "[heap]";
+    } else if (start == info->vdso) {
+        path = "[vdso]";
+#ifdef TARGET_X86_64
+    } else if (start == TARGET_VSYSCALL_PAGE) {
+        path = "[vsyscall]";
+#endif
+    }
+
+    /* Except null device (MAP_ANON), adjust offset for this fragment. */
+    offset = mi->offset;
+    if (mi->dev) {
+        uintptr_t hstart = (uintptr_t)g2h_untagged(start);
+        offset += hstart - mi->itree.start;
+    }
+
+    count = dprintf(fd, TARGET_ABI_FMT_ptr "-" TARGET_ABI_FMT_ptr
+                    " %c%c%c%c %08" PRIx64 " %02x:%02x %"PRId64,
+                    start, end,
+                    (flags & PAGE_READ) ? 'r' : '-',
+                    (flags & PAGE_WRITE_ORG) ? 'w' : '-',
+                    (flags & PAGE_EXEC) ? 'x' : '-',
+                    mi->is_priv ? 'p' : 's',
+                    offset, major(mi->dev), minor(mi->dev),
+                    (uint64_t)mi->inode);
+    if (path) {
+        dprintf(fd, "%*s%s\n", 73 - count, "", path);
+    } else {
+        dprintf(fd, "\n");
+    }
+
+    if (d->smaps) {
+        unsigned long size = end - start;
+        unsigned long page_size_kb = TARGET_PAGE_SIZE >> 10;
+        unsigned long size_kb = size >> 10;
+
+        dprintf(fd, "Size:                  %lu kB\n"
+                "KernelPageSize:        %lu kB\n"
+                "MMUPageSize:           %lu kB\n"
+                "Rss:                   0 kB\n"
+                "Pss:                   0 kB\n"
+                "Pss_Dirty:             0 kB\n"
+                "Shared_Clean:          0 kB\n"
+                "Shared_Dirty:          0 kB\n"
+                "Private_Clean:         0 kB\n"
+                "Private_Dirty:         0 kB\n"
+                "Referenced:            0 kB\n"
+                "Anonymous:             %lu kB\n"
+                "LazyFree:              0 kB\n"
+                "AnonHugePages:         0 kB\n"
+                "ShmemPmdMapped:        0 kB\n"
+                "FilePmdMapped:         0 kB\n"
+                "Shared_Hugetlb:        0 kB\n"
+                "Private_Hugetlb:       0 kB\n"
+                "Swap:                  0 kB\n"
+                "SwapPss:               0 kB\n"
+                "Locked:                0 kB\n"
+                "THPeligible:    0\n"
+                "VmFlags:%s%s%s%s%s%s%s%s\n",
+                size_kb, page_size_kb, page_size_kb,
+                (flags & PAGE_ANON ? size_kb : 0),
+                (flags & PAGE_READ) ? " rd" : "",
+                (flags & PAGE_WRITE_ORG) ? " wr" : "",
+                (flags & PAGE_EXEC) ? " ex" : "",
+                mi->is_priv ? "" : " sh",
+                (flags & PAGE_READ) ? " mr" : "",
+                (flags & PAGE_WRITE_ORG) ? " mw" : "",
+                (flags & PAGE_EXEC) ? " me" : "",
+                mi->is_priv ? "" : " ms");
+    }
+}
+
+/*
+ * Callback for walk_memory_regions, when read_self_maps() fails.
+ * Proceed without the benefit of host /proc/self/maps cross-check.
+ */
+static int open_self_maps_3(void *opaque, target_ulong guest_start,
+                            target_ulong guest_end, unsigned long flags)
+{
+    static const MapInfo mi = { .is_priv = true };
+
+    open_self_maps_4(opaque, &mi, guest_start, guest_end, flags);
+    return 0;
+}
+
+/*
+ * Callback for walk_memory_regions, when read_self_maps() succeeds.
+ */
+static int open_self_maps_2(void *opaque, target_ulong guest_start,
+                            target_ulong guest_end, unsigned long flags)
+{
+    const struct open_self_maps_data *d = opaque;
+    uintptr_t host_start = (uintptr_t)g2h_untagged(guest_start);
+    uintptr_t host_last = (uintptr_t)g2h_untagged(guest_end - 1);
+
+#ifdef TARGET_X86_64
+    /*
+     * Because of the extremely high position of the page within the guest
+     * virtual address space, this is not backed by host memory at all.
+     * Therefore the loop below would fail.  This is the only instance
+     * of not having host backing memory.
+     */
+    if (guest_start == TARGET_VSYSCALL_PAGE) {
+        return open_self_maps_3(opaque, guest_start, guest_end, flags);
+    }
+#endif
+
+    while (1) {
+        IntervalTreeNode *n =
+            interval_tree_iter_first(d->host_maps, host_start, host_start);
+        MapInfo *mi = container_of(n, MapInfo, itree);
+        uintptr_t this_hlast = MIN(host_last, n->last);
+        target_ulong this_gend = h2g(this_hlast) + 1;
+
+        open_self_maps_4(d, mi, guest_start, this_gend, flags);
+
+        if (this_hlast == host_last) {
+            return 0;
+        }
+        host_start = this_hlast + 1;
+        guest_start = h2g(host_start);
+    }
+}
+
+static int open_self_maps_1_real(CPUArchState *env, int fd, bool smaps)
+{
+    struct open_self_maps_data d = {
+        .ts = env_cpu(env)->opaque,
+        .host_maps = read_self_maps(),
+        .fd = fd,
+        .smaps = smaps
+    };
+
+    if (d.host_maps) {
+        walk_memory_regions(&d, open_self_maps_2);
+        free_self_maps(d.host_maps);
+    } else {
+        walk_memory_regions(&d, open_self_maps_3);
+    }
+
+    return 0;
+}
+
+static void show_smaps(int fd, unsigned long size)
+{
+    unsigned long page_size_kb = TARGET_PAGE_SIZE >> 10;
+    unsigned long size_kb = size >> 10;
+
+    dprintf(fd, "Size:                  %lu kB\n"
+                "KernelPageSize:        %lu kB\n"
+                "MMUPageSize:           %lu kB\n"
+                "Rss:                   0 kB\n"
+                "Pss:                   0 kB\n"
+                "Pss_Dirty:             0 kB\n"
+                "Shared_Clean:          0 kB\n"
+                "Shared_Dirty:          0 kB\n"
+                "Private_Clean:         0 kB\n"
+                "Private_Dirty:         0 kB\n"
+                "Referenced:            0 kB\n"
+                "Anonymous:             0 kB\n"
+                "LazyFree:              0 kB\n"
+                "AnonHugePages:         0 kB\n"
+                "ShmemPmdMapped:        0 kB\n"
+                "FilePmdMapped:         0 kB\n"
+                "Shared_Hugetlb:        0 kB\n"
+                "Private_Hugetlb:       0 kB\n"
+                "Swap:                  0 kB\n"
+                "SwapPss:               0 kB\n"
+                "Locked:                0 kB\n"
+                "THPeligible:    0\n", size_kb, page_size_kb, page_size_kb);
+}
+
+static int open_self_maps_1(CPUArchState *cpu_env, int fd, bool smaps)
 {
     CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
     TaskState *ts = cpu->opaque;
-    GSList *map_info = read_self_maps();
-    GSList *s;
+    IntervalTreeRoot *map_info = read_self_maps();
+    IntervalTreeNode *s;
     int count;
 
-    for (s = map_info; s; s = g_slist_next(s)) {
-        MapInfo *e = (MapInfo *) s->data;
+    for (s = interval_tree_iter_first(map_info, 0, -1); s;
+         s = interval_tree_iter_next(s, 0, -1)) {
+        MapInfo *e = container_of(s, MapInfo, itree);
 
-        if (h2g_valid(e->start)) {
-            unsigned long min = e->start;
-            unsigned long max = e->end;
+        if (h2g_valid(e->itree.start)) {
+            unsigned long min = e->itree.start;
+            unsigned long max = e->itree.last + 1;
             int flags = page_get_flags(h2g(min));
             const char *path;
 
             max = h2g_valid(max - 1) ?
                 max : (uintptr_t) g2h_untagged(GUEST_ADDR_MAX) + 1;
 
-            if (page_check_range(h2g(min), max - min, flags) == -1) {
+            if (!page_check_range(h2g(min), max - min, flags)) {
                 continue;
             }
 
@@ -7893,17 +10680,31 @@ static int open_self_maps(void *cpu_env, int fd)
             }
 
             count = dprintf(fd, TARGET_ABI_FMT_ptr "-" TARGET_ABI_FMT_ptr
-                            " %c%c%c%c %08" PRIx64 " %s %"PRId64,
+                            " %c%c%c%c %08" PRIx64 " %02x:%02x %"PRId64,
                             h2g(min), h2g(max - 1) + 1,
                             (flags & PAGE_READ) ? 'r' : '-',
                             (flags & PAGE_WRITE_ORG) ? 'w' : '-',
                             (flags & PAGE_EXEC) ? 'x' : '-',
-                            e->is_priv ? 'p' : '-',
-                            (uint64_t) e->offset, e->dev, e->inode);
+                            e->is_priv ? 'p' : 's',
+                            (uint64_t)e->offset,
+                            major(e->dev), minor(e->dev),
+                            (uint64_t)e->inode);
             if (path) {
                 dprintf(fd, "%*s%s\n", 73 - count, "", path);
             } else {
                 dprintf(fd, "\n");
+            }
+            if (smaps) {
+                show_smaps(fd, max - min);
+                dprintf(fd, "VmFlags:%s%s%s%s%s%s%s%s\n",
+                        (flags & PAGE_READ) ? " rd" : "",
+                        (flags & PAGE_WRITE_ORG) ? " wr" : "",
+                        (flags & PAGE_EXEC) ? " ex" : "",
+                        e->is_priv ? "" : " sh",
+                        (flags & PAGE_READ) ? " mr" : "",
+                        (flags & PAGE_WRITE_ORG) ? " mw" : "",
+                        (flags & PAGE_EXEC) ? " me" : "",
+                        e->is_priv ? "" : " ms");
             }
         }
     }
@@ -7920,22 +10721,63 @@ static int open_self_maps(void *cpu_env, int fd)
                     TARGET_VSYSCALL_PAGE, TARGET_VSYSCALL_PAGE + TARGET_PAGE_SIZE);
     dprintf(fd, "%*s%s\n", 73 - count, "",  "[vsyscall]");
 #endif
+    if (smaps) {
+        show_smaps(fd, TARGET_PAGE_SIZE);
+        dprintf(fd, "VmFlags: ex\n");
+    }
 
     return 0;
 }
 
-static int open_self_stat(void *cpu_env, int fd)
+static int open_self_maps(void *cpu_env, int fd, const char *oldpath)
+{
+    return option_real_maps ? open_self_maps_1_real((CPUArchState *)cpu_env, fd, false)
+        : open_self_maps_1((CPUArchState *)cpu_env, fd, false);
+}
+
+static int open_self_smaps(void *cpu_env, int fd, const char *oldpath)
+{
+    return option_real_maps ? open_self_maps_1_real((CPUArchState *)cpu_env, fd, true)
+        : open_self_maps_1((CPUArchState *)cpu_env, fd, true);
+}
+
+static int open_self_stat(void *cpu_env, int fd, const char *oldpath)
 {
     CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
     TaskState *ts = cpu->opaque;
     g_autoptr(GString) buf = g_string_new(NULL);
-    int i;
+    int i = 0;
 
-    for (i = 0; i < 44; i++) {
-        if (i == 0) {
-            /* pid */
-            g_string_printf(buf, FMT_pid " ", getpid());
-        } else if (i == 1) {
+    FILE *fp;
+    char *orig = NULL;
+    char *word = NULL;
+    size_t orig_len = 0;
+    int word_len = 0;
+
+    fp = fopen("/proc/self/stat", "r");
+    if (fp == NULL || getline(&orig, &orig_len, fp) == -1)
+        return -1;
+
+    word = orig;
+
+    do {
+        orig = word;
+        word = strchr(orig, ' ');
+
+        /* last word */
+        if (NULL == word) {
+            /* Find a pointer to '\0' */
+            word = strchr(orig, '\0');
+            if (NULL == word)
+                return -1;
+            /* \0 not needed */
+            word --;
+            /* Don't enter the loop next time */
+            i = -1;
+        }
+        word_len = ++word - orig;
+
+        if (i == 1) {
             /* app name */
             gchar *bin = g_strrstr(ts->bprm->argv[0], "/");
             bin = bin ? bin + 1 : ts->bprm->argv[0];
@@ -7944,19 +10786,22 @@ static int open_self_stat(void *cpu_env, int fd)
             /* stack bottom */
             g_string_printf(buf, TARGET_ABI_FMT_ld " ", ts->info->start_stack);
         } else {
-            /* for the rest, there is MasterCard */
-            g_string_printf(buf, "0%c", i == 43 ? '\n' : ' ');
+            if (write(fd, orig, word_len) != word_len)
+                return -1;
+            continue;
         }
 
         if (write(fd, buf->str, buf->len) != buf->len) {
             return -1;
         }
-    }
 
+    } while(++i);
+
+    fclose(fp);
     return 0;
 }
 
-static int open_self_auxv(void *cpu_env, int fd)
+static int open_self_auxv(void *cpu_env, int fd, const char *oldpath)
 {
     CPUState *cpu = env_cpu((CPUArchState *)cpu_env);
     TaskState *ts = cpu->opaque;
@@ -8009,9 +10854,32 @@ static int is_proc_myself(const char *filename, const char *entry)
     }
     return 0;
 }
-
+static int is_proc_other(const char *filename, const char *entry)
+{
+    if (!strncmp(filename, "/proc/", strlen("/proc/"))) {
+        filename += strlen("/proc/");
+        if (*filename >= '1' && *filename <= '9') {
+            char myself[80];
+            snprintf(myself, sizeof(myself), "%d/", getpid());
+            if (!strncmp(filename, myself, strlen(myself))) {
+                return 0;//skip self
+            }
+            int elen = strlen(entry);
+            int flen = strlen(filename);
+            if (flen <= elen) {
+                return 0;
+            } else if(!strncmp(filename + (flen - elen), entry, elen)) {
+                return 1;
+            }
+        } else {
+            return 0;
+        }
+    }
+    return 0;
+}
 #if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN) || \
-    defined(TARGET_SPARC) || defined(TARGET_M68K) || defined(TARGET_HPPA)
+    defined(TARGET_SPARC) || defined(TARGET_M68K) || defined(TARGET_HPPA) || \
+    defined(TARGET_I386)
 static int is_proc(const char *filename, const char *entry)
 {
     return strcmp(filename, entry) == 0;
@@ -8019,7 +10887,7 @@ static int is_proc(const char *filename, const char *entry)
 #endif
 
 #if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
-static int open_net_route(void *cpu_env, int fd)
+static int open_net_route(void *cpu_env, int fd, const char *oldpath)
 {
     FILE *fp;
     char *line = NULL;
@@ -8064,7 +10932,7 @@ static int open_net_route(void *cpu_env, int fd)
 #endif
 
 #if defined(TARGET_SPARC)
-static int open_cpuinfo(void *cpu_env, int fd)
+static int open_cpuinfo(void *cpu_env, int fd, const char *oldpath)
 {
     dprintf(fd, "type\t\t: sun4u\n");
     return 0;
@@ -8072,7 +10940,7 @@ static int open_cpuinfo(void *cpu_env, int fd)
 #endif
 
 #if defined(TARGET_HPPA)
-static int open_cpuinfo(void *cpu_env, int fd)
+static int open_cpuinfo(void *cpu_env, int fd, const char *oldpath)
 {
     dprintf(fd, "cpu family\t: PA-RISC 1.1e\n");
     dprintf(fd, "cpu\t\t: PA7300LC (PCX-L2)\n");
@@ -8083,8 +10951,118 @@ static int open_cpuinfo(void *cpu_env, int fd)
 }
 #endif
 
+#if defined(TARGET_I386)
+enum cpuid_flags_group {
+CPUID_GROUP_BASE = 0,
+CPUID_GROUP_EXT,
+CPUID_GROUP_EXT2,
+CPUID_GROUP_EXT3,
+};
+const char *__x86_cpuid_flags_table[] = {
+"fp87", "vme", "de", "pse", "tsc", "msr", "pae", "mce",
+"cx8", "apic", "", "sep", "mtrr", "pge", "mca", "cmov",
+"pat", "pse36", "pn", "clflush", "", "dts", "acpi", "mmx",
+"fxsr", "sse", "sse2", "ss", "ht", "tm", "ia64", "pbe",
+/*ext*/
+"sse3", "pclmulqdq", "dtes64", "monitor", "dscpl", "vmx", "smx", "est",
+"tm2", "ssse3", "cid", "", "fma", "cx16", "xtpr", "pdcm ",
+"", "pcid", "dca", "sse4_1", "sse4_2", "x2apic", "movbe", "popcnt",
+"tsc_deadline_timer", "aes", "xsave", "osxsave",
+"avx", "f16c", "rdrand", "hypervisor",
+/*ext2*/
+"fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce",
+"cx8", "apic", "", "sep", "mtrr" "pge", "mca", "cmov",
+"pat", "pse36", "mp", "", "nx", "", "mmxext", "mmx",
+"fxsr", "fxsr_opt", "pdpe1gb", "rdtscp", "", "lm", "3dnowext", "3dnowprefetch",
+/*ext3*/
+"lahf_lm", "cmp_legacy", "svm", "extapic",
+"cr8_legacy", "abm", "sse4a", "misalignsse",
+"3dnowprefetch", "osvw", "ibs", "xop", "skinit", "wdt", "", "lwp",
+"fma4", "tce", "", "nodeid", "", "tbm", "topoext", "perfctr_core",
+"perfctr_nb"
+};
+char *g_cpu_flags;
+static char *cpuinfo_flags(CPUArchState *env)
+{
+    char l_flags[5000] = {0};
+    char l_tmp[20] = {0};
+    char *r_flags = NULL;
+    for (int i = 0; i < FEATURE_WORDS; i++) {
+        if (env->features[i]) {
+            int group = 0;
+            if (i == FEAT_1_EDX) {
+                group = CPUID_GROUP_BASE;
+            } else if (i == FEAT_1_ECX) {
+                group = CPUID_GROUP_EXT;
+            } else if (i == FEAT_8000_0001_EDX) {
+                group = CPUID_GROUP_EXT2;
+            } else if (i == FEAT_8000_0001_ECX) {
+                group = CPUID_GROUP_EXT3;
+            } else {
+                g_assert(0);
+            };
+            for (int j = 0; j < 32; j++) {
+                if (env->features[i] & (1U << j)) {
+                    if (group == CPUID_GROUP_EXT3) {
+                        g_assert(j <= 24);
+                    }
+                    snprintf(l_tmp, 20, "%s ",
+                        __x86_cpuid_flags_table[32 * group + j]);
+                    if (!strstr(l_flags, l_tmp)) {
+                        strcat(l_flags, l_tmp);
+                    }
+                }
+            }
+        }
+    }
+    g_assert(strlen(l_flags));
+    r_flags = calloc(1, strlen(l_flags));
+    /*dec a space byte.*/
+    memcpy(r_flags, l_flags, strlen(l_flags) - 1);
+    return r_flags;
+}
+static int open_cpuinfo(void *cpu_env, int fd, const char *oldpath)
+{
+    int i;
+    int nprocs = get_nprocs();
+    for (i =0; i < nprocs; i ++) {
+        dprintf(fd, "processor	: %d\n", i);
+        dprintf(fd, "vendor_id	: Loongson\n");
+#if defined(TARGET_X86_64) && defined(CONFIG_LATX)
+        dprintf(fd, "model name	: LATX64\n");
+#elif !defined(TARGET_X86_64) && defined(CONFIG_LATX)
+        dprintf(fd, "model name	: LATX32\n");
+#elif defined(TARGET_X86_64) && !defined(CONFIG_LATX)
+        dprintf(fd, "model name	: TCG64\n");
+#else
+        dprintf(fd, "model name	: TCG32\n");
+#endif
+        dprintf(fd, "cpu MHz	: 2500\n");
+        dprintf(fd, "physical id	: 0\n");
+        dprintf(fd, "siblings	: %d\n", nprocs);
+        dprintf(fd, "core id		: %d\n", i);
+        dprintf(fd, "cpu cores	: %d\n", nprocs);
+        if (!g_cpu_flags) {
+            CPUState *cpu = env_cpu(cpu_env);
+            CPUArchState *env = cpu->env_ptr;
+            g_cpu_flags = cpuinfo_flags(env);
+        }
+        dprintf(fd, "flags\t: %s\n", g_cpu_flags);
+        dprintf(fd, "\n");
+    }
+
+    return 0;
+}
+
+static int open_version(void *cpu_env, int fd, const char *oldpath)
+{
+    dprintf(fd, "Linux version 4.19.0-19-loongson-3 (abuild@10.40.52.160) (gcc version 8.3.0 (Ubuntu 8.3.0-6.lnd.vec.36)) #1 SMP 4.19.190.8.14 Thu Aug 24 08:54:20 UTC 2023\n");
+    return 0;
+}
+#endif
+
 #if defined(TARGET_M68K)
-static int open_hardware(void *cpu_env, int fd)
+static int open_hardware(void *cpu_env, int fd, const char *oldpath)
 {
     dprintf(fd, "Model:\t\tqemu-m68k\n");
     return 0;
@@ -8095,30 +11073,32 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
 {
     struct fake_open {
         const char *filename;
-        int (*fill)(void *cpu_env, int fd);
+        int (*fill)(void *cpu_env, int fd, const char *oldpath);
         int (*cmp)(const char *s1, const char *s2);
     };
     const struct fake_open *fake_open;
     static const struct fake_open fakes[] = {
         { "maps", open_self_maps, is_proc_myself },
+        { "smaps", open_self_smaps, is_proc_myself },
         { "stat", open_self_stat, is_proc_myself },
         { "auxv", open_self_auxv, is_proc_myself },
         { "cmdline", open_self_cmdline, is_proc_myself },
+        { "cmdline", open_other_cmdline, is_proc_other},
 #if defined(HOST_WORDS_BIGENDIAN) != defined(TARGET_WORDS_BIGENDIAN)
         { "/proc/net/route", open_net_route, is_proc },
 #endif
-#if defined(TARGET_SPARC) || defined(TARGET_HPPA)
+#if defined(TARGET_SPARC) || defined(TARGET_HPPA) || defined(TARGET_I386)
         { "/proc/cpuinfo", open_cpuinfo, is_proc },
 #endif
 #if defined(TARGET_M68K)
         { "/proc/hardware", open_hardware, is_proc },
 #endif
+        { "/proc/version", open_version, is_proc },
         { NULL, NULL, NULL }
     };
 
     if (is_proc_myself(pathname, "exe")) {
-        int execfd = qemu_getauxval(AT_EXECFD);
-        return execfd ? execfd : safe_openat(dirfd, exec_path, flags, mode);
+        return safe_openat(dirfd, exec_path, flags, mode);
     }
 
     for (fake_open = fakes; fake_open->filename; fake_open++) {
@@ -8131,19 +11111,29 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
         const char *tmpdir;
         char filename[PATH_MAX];
         int fd, r;
+        char *latx_filename;
+        char *slash;
 
         /* create temporary file to map stat to */
         tmpdir = getenv("TMPDIR");
         if (!tmpdir)
             tmpdir = "/tmp";
-        snprintf(filename, sizeof(filename), "%s/qemu-open.XXXXXX", tmpdir);
+
+        slash = strrchr(fake_open->filename, '/');
+        if (slash) {
+            latx_filename = slash + 1;
+        } else {
+            latx_filename = (char *)fake_open->filename;
+        }
+        snprintf(filename, sizeof(filename), "%s/latxopen-%s.XXXXXX",
+                    tmpdir, latx_filename);
         fd = mkstemp(filename);
         if (fd < 0) {
             return fd;
         }
         unlink(filename);
 
-        if ((r = fake_open->fill(cpu_env, fd))) {
+        if ((r = fake_open->fill(cpu_env, fd, pathname))) {
             int e = errno;
             close(fd);
             errno = e;
@@ -8155,6 +11145,59 @@ static int do_openat(void *cpu_env, int dirfd, const char *pathname, int flags, 
     }
 
     return safe_openat(dirfd, path(pathname), flags, mode);
+}
+
+#define MAX_PATH_SIZE 1024
+static int real_proc_self_fd(int ofd)
+{
+    char buf_in[MAX_PATH_SIZE] = {'\0'};
+    char buf_out[MAX_PATH_SIZE] = {'\0'};
+    const char *tmpdir;
+    char *filename = buf_out;
+    int len;
+    int fd = -1;
+
+    /* get filename */
+    snprintf(buf_in, sizeof(buf_in), "/proc/self/fd/%d", ofd);
+    if (readlink(buf_in, buf_out, MAX_PATH_SIZE) < 0) {
+        return fd;
+    }
+
+    /*is /proc/myself */
+    tmpdir = getenv("TMPDIR");
+    if (!tmpdir) {
+        tmpdir = "/tmp";
+    }
+
+    len = strlen("/latxopen-");
+    filename += strlen(tmpdir);
+    if (!strncmp(filename, "/latxopen-", len)) {
+        filename += len;
+        filename = strtok(filename, ".");
+    } else {
+        return -1;
+    }
+
+    /* open the real file */
+    snprintf(buf_in, sizeof(buf_in), "/proc/self/%s", filename);
+    fd = openat(AT_FDCWD, buf_in, O_RDONLY);
+    return fd;
+
+}
+
+static int proc_self_fstat(int ofd, struct stat *st)
+{
+    int ret = -1;
+    int fd = real_proc_self_fd(ofd);
+    if (fd == -1) {
+        return ret;
+    }
+
+    /* call fstat */
+    ret = get_errno(fstat(fd, st));
+    close(fd);
+
+    return ret;
 }
 
 #define TIMER_MAGIC 0x0caf0000
@@ -8245,6 +11288,29 @@ static int host_to_target_cpu_mask(const unsigned long *host_mask,
     return 0;
 }
 
+static bool is_x86_file(char *file_name)
+{
+    int fd = open(file_name, O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+
+    Elf64_Ehdr ehdr;
+    int read_size = read(fd, &ehdr, sizeof(ehdr));
+    close(fd);
+
+    if (read_size != sizeof(ehdr)) {
+        return false;
+    }
+
+    if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
+        ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3) {
+        return false;
+    }
+
+    return (ehdr.e_machine == EM_386) || (ehdr.e_machine == EM_X86_64);
+}
+
 /* This is an internal helper for do_syscall so that it is easier
  * to have a single return point, so that actions, such as logging
  * of syscall results, can be performed.
@@ -8256,6 +11322,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                             abi_long arg8)
 {
     CPUState *cpu = env_cpu(cpu_env);
+    CPUArchState *env = cpu->env_ptr;
     abi_long ret;
 #if defined(TARGET_NR_stat) || defined(TARGET_NR_stat64) \
     || defined(TARGET_NR_lstat) || defined(TARGET_NR_lstat64) \
@@ -8270,22 +11337,48 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     void *p;
 
     switch(num) {
+    case TARGET_NR_ioperm:
+    #define IO_BITMAP_BITS 65536
+        if (((uint32_t)arg1 + (size_t)arg2 <=
+            (uint32_t)arg1) ||
+            ((uint32_t)arg1 + (size_t)arg2 > IO_BITMAP_BITS)) {
+                return -TARGET_EINVAL;
+            }
+        return -TARGET_EPERM;
+        break;
+    case TARGET_NR_iopl:
+        if (arg1 == 0) {
+            ret = 0;
+        } else {
+            ret = -TARGET_EPERM;
+        }
+        return ret;
     case TARGET_NR_exit:
+        /*
+         * During thread exit, need to free gdt table to avoid memory leak.
+         */
+        assert(env->gdt.base);
+        target_munmap(env->gdt.base, sizeof(uint64_t) * TARGET_GDT_ENTRIES, 0);
         /* In old applications this may be used to implement _exit(2).
            However in threaded applications it is used for thread termination,
            and _exit_group is used for application termination.
            Do thread termination if we have more then one thread.  */
-
         if (block_signals()) {
             return -TARGET_ERESTARTSYS;
         }
 
         pthread_mutex_lock(&clone_lock);
+#ifdef CONFIG_LATX_AOT
+        if(current_cpu->cpu_index == 0) {
+            aot_exit_entry(cpu, false);
+        }
+#endif
 
         if (CPU_NEXT(first_cpu)) {
             TaskState *ts = cpu->opaque;
 
             object_property_set_bool(OBJECT(cpu), "realized", false, NULL);
+            object_unparent(OBJECT(cpu));
             object_unref(OBJECT(cpu));
             /*
              * At this point the CPU should be unrealized and removed
@@ -8308,6 +11401,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
         pthread_mutex_unlock(&clone_lock);
         preexit_cleanup(cpu_env, arg1);
+
+        /* dump basic block here. TODO */
+
         _exit(arg1);
         return 0; /* avoid warning */
     case TARGET_NR_read:
@@ -8389,6 +11485,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_waitpid:
         {
             int status;
+            /* We don't support child exit with no SIGCHLD sent */
+            if(arg3 & __WCLONE) {
+                arg3 &= ~__WCLONE;
+                arg3 |= __WALL;
+            }
             ret = get_errno(safe_wait4(arg1, &status, arg3, 0));
             if (!is_error(ret) && arg2 && ret
                 && put_user_s32(host_to_target_waitstatus(status), arg2))
@@ -8468,6 +11569,153 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         unlock_user(p, arg2, 0);
         return ret;
 #endif
+#ifdef TARGET_NR_execveat
+    case TARGET_NR_execveat:
+        {
+            char **argp, **envp;
+            int argc, envc;
+            abi_ulong gp;
+            abi_ulong guest_argp;
+            abi_ulong guest_envp;
+            abi_ulong addr;
+            char **q;
+            int total_size = 0;
+            argc = 0;
+            guest_argp = arg3;
+            for (gp = guest_argp; gp; gp += sizeof(abi_ulong)) {
+                if (get_user_ual(addr, gp)) {
+                    return -TARGET_EFAULT;
+                }
+                if (!addr) {
+                    break;
+                }
+                argc++;
+            }
+            envc = 0;
+            guest_envp = arg4;
+            for (gp = guest_envp; gp; gp += sizeof(abi_ulong)) {
+                if (get_user_ual(addr, gp)) {
+                    return -TARGET_EFAULT;
+                }
+                if (!addr) {
+                    break;
+                }
+                envc++;
+            }
+
+            argp = g_new0(char *, argc + 1);
+            envp = g_new0(char *, envc + 1);
+
+            for (gp = guest_argp, q = argp; gp;
+                  gp += sizeof(abi_ulong), q++) {
+                if (get_user_ual(addr, gp)) {
+                    goto execveat_efault;
+                }
+                if (!addr) {
+                    break;
+                }
+                *q = lock_user_string(addr);
+                if (!(*q)) {
+                    goto execveat_efault;
+                }
+                total_size += strlen(*q) + 1;
+            }
+            *q = NULL;
+
+            for (gp = guest_envp, q = envp; gp;
+                  gp += sizeof(abi_ulong), q++) {
+                if (get_user_ual(addr, gp)) {
+                    goto execveat_efault;
+                }
+                if (!addr) {
+                    break;
+                }
+                *q = lock_user_string(addr);
+                if (!(*q)) {
+                    goto execveat_efault;
+                }
+                total_size += strlen(*q) + 1;
+            }
+            *q = NULL;
+
+            p = lock_user_string(arg2);
+            if (!(p)) {
+                goto execveat_efault;
+            }
+
+            char* pname = strrchr(p, '/');
+            if (argp[0] && p && pname && strcmp(p, argp[0]) && strcmp(pname + 1, argp[0])
+                    && is_x86_file(p)) {
+                argc = argc + 3;
+                char **new_argp = g_new0(char *, argc + 1);
+                long long hash = 0;
+                char *hash_str = g_new0(char, 8 * sizeof(long long));
+                for (int i = 3; i < argc; ++i) {
+                    new_argp[i] = argp[i - 3];
+                    for (int j = 0; argp[i - 3][j] != '\0'; ++j) {
+                        hash += argp[i - 3][j];
+                    }
+                }
+                sprintf(hash_str, "%lld", hash);
+                new_argp[0] = new_argp[1] = p;
+                new_argp[2] = hash_str;
+                new_argp[argc] = NULL;
+                g_free(argp);
+                argp = new_argp;
+            }
+
+            if (is_proc_myself((const char *)p, "exe")) {
+                char real[PATH_MAX], *temp;
+                temp = realpath(exec_path, real);
+
+                if (temp == NULL) {
+                    ret = get_errno(-1);
+                    goto execveat_end;
+                }
+            }
+
+            /*
+             * Although execve() is not an interruptible syscall it is
+             * a special case where we must use the safe_syscall wrapper:
+             * if we allow a signal to happen before we make the host
+             * syscall then we will 'lose' it, because at the point of
+             * execve the process leaves QEMU's control. So we use the
+             * safe syscall wrapper to ensure that we either take the
+             * signal as a guest signal, or else it does not happen
+             * before the execve completes and makes it the other
+             * program's problem.
+             */
+            ret = get_errno(safe_execveat(arg1, p, argp, envp, arg5));
+            unlock_user(p, arg1, 0);
+
+            goto execveat_end;
+
+        execveat_efault:
+            ret = -TARGET_EFAULT;
+
+        execveat_end:
+            for (gp = guest_argp, q = argp; *q;
+                  gp += sizeof(abi_ulong), q++) {
+                if (get_user_ual(addr, gp)
+                    || !addr) {
+                    break;
+                }
+                unlock_user(*q, addr, 0);
+            }
+            for (gp = guest_envp, q = envp; *q;
+                  gp += sizeof(abi_ulong), q++) {
+                if (get_user_ual(addr, gp)
+                    || !addr) {
+                    break;
+                }
+                unlock_user(*q, addr, 0);
+            }
+
+            g_free(argp);
+            g_free(envp);
+        }
+        return ret;
+#endif
     case TARGET_NR_execve:
         {
             char **argp, **envp;
@@ -8478,7 +11726,6 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             abi_ulong addr;
             char **q;
             int total_size = 0;
-
             argc = 0;
             guest_argp = arg2;
             for (gp = guest_argp; gp; gp += sizeof(abi_ulong)) {
@@ -8527,17 +11774,55 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
             if (!(p = lock_user_string(arg1)))
                 goto execve_efault;
-            /* Although execve() is not an interruptible syscall it is
-             * a special case where we must use the safe_syscall wrapper:
-             * if we allow a signal to happen before we make the host
-             * syscall then we will 'lose' it, because at the point of
-             * execve the process leaves QEMU's control. So we use the
-             * safe syscall wrapper to ensure that we either take the
-             * signal as a guest signal, or else it does not happen
-             * before the execve completes and makes it the other
-             * program's problem.
-             */
-            ret = get_errno(safe_execve(p, argp, envp));
+
+            char* pname = strrchr(p, '/');
+            if (argp[0] && p && pname && strcmp(p, argp[0]) && strcmp(pname + 1, argp[0])
+                    && is_x86_file(p)) {
+                argc = argc + 3;
+                char **new_argp = g_new0(char *, argc + 1);
+                long long hash = 0;
+                char *hash_str = g_new0(char, 8 * sizeof(long long));
+                for (int i = 3; i < argc; ++i) {
+                    new_argp[i] = argp[i - 3];
+                    for (int j = 0; argp[i - 3][j] != '\0'; ++j) {
+                        hash += argp[i - 3][j];
+                    }
+                }
+                sprintf(hash_str, "%lld", hash);
+                new_argp[0] = new_argp[1] = p;
+                new_argp[2] = hash_str;
+                new_argp[argc] = NULL;
+                g_free(argp);
+                argp = new_argp;
+            }
+
+            if (is_proc_myself((const char *)p, "exe")) {
+                char real[PATH_MAX], *temp;
+                temp = realpath(exec_path, real);
+
+                if (!strcmp((const char *)*argp, "/proc/self/exe")) {
+                    *argp = temp;
+                }
+
+                if (temp == NULL) {
+                    ret = get_errno(-1);
+                    goto execve_end;
+                }
+                ret = get_errno(safe_execve(temp, argp, envp));
+            } else {
+
+                /* Although execve() is not an interruptible syscall it is
+                 * a special case where we must use the safe_syscall wrapper:
+                 * if we allow a signal to happen before we make the host
+                 * syscall then we will 'lose' it, because at the point of
+                 * execve the process leaves QEMU's control. So we use the
+                 * safe syscall wrapper to ensure that we either take the
+                 * signal as a guest signal, or else it does not happen
+                 * before the execve completes and makes it the other
+                 * program's problem.
+                 */
+                ret = get_errno(safe_execve(path(p), argp, envp));
+            }
             unlock_user(p, arg1, 0);
 
             goto execve_end;
@@ -8702,7 +11987,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_alarm /* not on alpha */
     case TARGET_NR_alarm:
-        return alarm(arg1);
+        return alarm((unsigned int)arg1);
 #endif
 #ifdef TARGET_NR_pause /* not on alpha */
     case TARGET_NR_pause:
@@ -8890,6 +12175,100 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return do_pipe(cpu_env, arg1,
                        target_to_host_bitmask(arg2, fcntl_flags_tbl), 1);
 #endif
+#ifdef TARGET_NR_ptrace
+    case TARGET_NR_ptrace:
+        {
+            TaskState *ts = cpu->opaque;
+            union sigval sig_value;
+            sig_value.sival_ptr = ts->ptrace_poke_page;
+#ifdef CONFIG_PTRACE_DEBUG
+            fprintf(stderr, "[PTRACE_DEBUG] %d request %d addr %x\n",
+                    getpid(), arg1,  arg3);
+#endif
+            void *addr = g2h_untagged(arg3);
+            switch (arg1) {
+            case PTRACE_PEEKTEXT:
+            case PTRACE_PEEKDATA:
+            case PTRACE_PEEKUSER:
+            {
+                ret = ptrace(arg1, arg2, addr, 0);
+                if (ret >= 0) {
+#if (defined(TARGET_I386) && defined(TARGET_ABI32))
+                    abi_long *p = (abi_long *)((uint64_t)(uint32_t)arg4);
+#else
+                    abi_long *p = (abi_long *)((uint64_t)arg4);
+#endif
+                    *p = ret;
+                    return ret;
+                }
+                return get_errno(ret);
+                break;
+            }
+            case PTRACE_POKETEXT:
+            case PTRACE_POKEDATA:
+            {
+                void *page = (void *)((unsigned long)arg3 & TARGET_PAGE_MASK);
+                if (!ts->ptrace_poke_page) {
+                    ts->ptrace_poke_page = page;
+                } else if (ts->ptrace_poke_page != page) {
+                    ts->ptrace_poke_page = (void *)-1;
+                }
+                unsigned long da;
+
+#if (defined(TARGET_I386) && defined(TARGET_ABI32))
+                /*
+                 * PTRACE_POKETEXT, PTRACE_POKEDATA:
+                 *   Copy the word data to the address addr in the
+                 *   tracee's memory.
+                 *
+                 * I386:
+                 *   __WORDSIZE 32
+                 *
+                 * LA64:
+                 *   __WORDSIZE 64
+                 */
+                da = ptrace(PTRACE_PEEKDATA, arg2, addr, 0);
+                da = (da & 0xffffffff00000000) | (arg4 & 0xffffffff);
+#else
+                da = arg4;
+#endif
+
+#ifdef CONFIG_PTRACE_DEBUG
+                fprintf(stderr, "[PTRACE_DEBUG] da %lx\n", da);
+#endif
+                return get_errno(ptrace(arg1, arg2, addr, da));
+                break;
+            }
+            case PTRACE_CONT:
+                if (ts->ptrace_poke_page) {
+                    if (sigqueue(arg2, LA_HOOK_PTRACE, sig_value) != 0) {
+#ifdef CONFIG_PTRACE_DEBUG
+                        fprintf(stderr, "[PTRACE_DEBUG] sigqueue error!\n");
+#endif
+                    }
+                    ts->ptrace_poke_page = NULL;
+                }
+                break;
+            case PTRACE_ATTACH:
+                ts->ptrace_poke_page = NULL;
+                break;
+            case PTRACE_DETACH:
+                if (ts->ptrace_poke_page) {
+                    if (sigqueue(arg2, LA_HOOK_PTRACE, sig_value) != 0) {
+#ifdef CONFIG_PTRACE_DEBUG
+                        fprintf(stderr, "[PTRACE_DEBUG] sigqueue error!\n");
+#endif
+                    }
+                    ts->ptrace_poke_page = NULL;
+                }
+                break;
+            default:
+                break;
+            }
+
+            return get_errno(ptrace(arg1, arg2, addr, arg4));
+        }
+#endif
     case TARGET_NR_times:
         {
             struct target_tms *tmsp;
@@ -8928,7 +12307,16 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
     case TARGET_NR_ioctl:
-        return do_ioctl(arg1, arg2, arg3);
+        ret = do_ioctl(arg1, arg2, arg3);
+#ifdef CONFIG_LATX_DEBUG
+        if (ret) {
+            qemu_log_mask(LAT_LOG_SYSCALL,
+                    "[LATX_SYSCALL] do_ioctl error fd " TARGET_FMT_ld
+                    " cmd 0x" TARGET_FMT_lx " ret " TARGET_FMT_ld "\n",
+                    arg1, arg2, ret);
+        }
+#endif
+        return ret;
 #ifdef TARGET_NR_fcntl
     case TARGET_NR_fcntl:
         return do_fcntl(arg1, arg2, arg3);
@@ -9282,6 +12670,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 if (!(p = lock_user(VERIFY_WRITE, arg1, sizeof(target_sigset_t), 0)))
                     return -TARGET_EFAULT;
                 host_to_target_old_sigset(p, &set);
+                target_sigpending(p);
                 unlock_user(p, arg1, sizeof(target_sigset_t));
             }
         }
@@ -9305,6 +12694,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 if (!(p = lock_user(VERIFY_WRITE, arg1, sizeof(target_sigset_t), 0)))
                     return -TARGET_EFAULT;
                 host_to_target_sigset(p, &set);
+                target_sigpending(p);
                 unlock_user(p, arg1, sizeof(target_sigset_t));
             }
         }
@@ -9440,7 +12830,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             target_to_host_siginfo(&uinfo, p);
             unlock_user(p, arg3, 0);
-            ret = get_errno(sys_rt_sigqueueinfo(arg1, arg2, &uinfo));
+            ret = get_errno(sys_rt_sigqueueinfo(arg1, target_to_host_signal(arg2), &uinfo));
         }
         return ret;
     case TARGET_NR_rt_tgsigqueueinfo:
@@ -9453,7 +12843,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             target_to_host_siginfo(&uinfo, p);
             unlock_user(p, arg4, 0);
-            ret = get_errno(sys_rt_tgsigqueueinfo(arg1, arg2, arg3, &uinfo));
+            ret = get_errno(sys_rt_tgsigqueueinfo(arg1, arg2, target_to_host_signal(arg3), &uinfo));
         }
         return ret;
 #ifdef TARGET_NR_sigreturn
@@ -9475,6 +12865,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         unlock_user(p, arg1, 0);
         return ret;
 #ifdef TARGET_NR_setrlimit
+#ifdef TARGET_HPPA
+#define STACK_GROWS_DOWN 0
+#endif /* TARGET_HPPA */
+#ifndef STACK_GROWS_DOWN
+#define STACK_GROWS_DOWN 1
+#endif
     case TARGET_NR_setrlimit:
         {
             int resource = target_to_host_resource(arg1);
@@ -9498,6 +12894,39 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 resource != RLIMIT_STACK) {
                 return get_errno(setrlimit(resource, &rlim));
             } else {
+                if (resource == RLIMIT_STACK) {
+                    if (rlim.rlim_cur > real_guest_stack_size) {
+#if defined(CONFIG_LATX_DEBUG)
+                        fprintf(stderr, "WARNING: target stack size exceed 128m\n");
+#endif
+                        rlim.rlim_cur = real_guest_stack_size;
+                        /*return -TARGET_EFAULT;*/
+                    }
+                    TaskState *ts = cpu->opaque;
+                    if (rlim.rlim_cur < vir_guest_stack_size) {
+                        /* stack shrink is not emulated */
+                        return 0;
+                    }
+                    if (STACK_GROWS_DOWN) {
+                        target_mprotect(ts->info->stack_limit - (rlim.rlim_cur -
+                            vir_guest_stack_size), rlim.rlim_cur - vir_guest_stack_size,
+                            PROT_READ | PROT_WRITE);
+                        ts->info->stack_limit -= rlim.rlim_cur - vir_guest_stack_size;
+                    } else {
+                        target_mprotect(ts->info->stack_limit + (rlim.rlim_cur -
+                            vir_guest_stack_size), rlim.rlim_cur - vir_guest_stack_size,
+                            PROT_READ | PROT_WRITE);
+                        ts->info->stack_limit += rlim.rlim_cur - vir_guest_stack_size;
+                    }
+                    vir_guest_stack_size = rlim.rlim_cur;
+                }
+                if (resource == RLIMIT_AS || resource == RLIMIT_DATA) {
+                    vir_rlimit_as_old = vir_rlimit_as;
+                    vir_rlimit_as = rlim.rlim_cur;
+                    if (vir_rlimit_as != RLIM_INFINITY) {
+                        vir_rlimit_as_acc = 0;
+                    }
+                }
                 return 0;
             }
         }
@@ -9515,6 +12944,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                     return -TARGET_EFAULT;
                 target_rlim->rlim_cur = host_to_target_rlim(rlim.rlim_cur);
                 target_rlim->rlim_max = host_to_target_rlim(rlim.rlim_max);
+                if (resource == RLIMIT_AS || resource == RLIMIT_DATA) {
+                    target_rlim->rlim_cur = tswap64(vir_rlimit_as);
+                } else if (resource == RLIMIT_STACK) {
+                    target_rlim->rlim_cur = tswap64(vir_guest_stack_size);
+                }
                 unlock_user_struct(target_rlim, arg2, 1);
             }
         }
@@ -9628,7 +13062,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             void *p2;
             p = lock_user_string(arg1);
             p2 = lock_user(VERIFY_WRITE, arg2, arg3, 0);
-            if (!p || !p2) {
+            if (arg3 < 0) {
+                ret = -TARGET_EINVAL;
+            } else if (!p || !p2) {
                 ret = -TARGET_EFAULT;
             } else if (!arg3) {
                 /* Short circuit this for the magic exe check. */
@@ -9638,7 +13074,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 temp = realpath(exec_path, real);
                 /* Return value is # of bytes that we wrote to the buffer. */
                 if (temp == NULL) {
-                    ret = get_errno(-1);
+                    ret = MIN(strlen(real_path), arg3);
+                    memcpy(p2, real_path, ret);
                 } else {
                     /* Don't worry about sign mismatch as earlier mapping
                      * logic would have thrown a bad address error. */
@@ -9716,14 +13153,25 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             unlock_user(v, arg1, 0);
             ret = get_errno(target_mmap(v1, v2, v3,
                                         target_to_host_bitmask(v4, mmap_flags_tbl),
-                                        v5, v6));
+                                        v5, v6, 1));
         }
 #else
+
+        if (!(arg4 & TARGET_MAP_ANONYMOUS) && (arg4 & TARGET_MAP_SHARED_VALIDATE)) {
+            unsigned long flags_mask = LEGACY_MAP_MASK;
+#ifdef TARGET_X86_64
+            flags_mask |= X86_64_MAP_32BIT;
+#endif
+            if (arg4 & ~flags_mask) {
+                return -EOPNOTSUPP;
+            }
+        }
+
         /* mmap pointers are always untagged */
         ret = get_errno(target_mmap(arg1, arg2, arg3,
                                     target_to_host_bitmask(arg4, mmap_flags_tbl),
                                     arg5,
-                                    arg6));
+                                    arg6, 1));
 #endif
         return ret;
 #endif
@@ -9734,12 +13182,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
         ret = target_mmap(arg1, arg2, arg3,
                           target_to_host_bitmask(arg4, mmap_flags_tbl),
-                          arg5, arg6 << MMAP_SHIFT);
+                          arg5, (uint64_t)arg6 << MMAP_SHIFT, 1);
         return get_errno(ret);
 #endif
     case TARGET_NR_munmap:
         arg1 = cpu_untagged_addr(cpu, arg1);
-        return get_errno(target_munmap(arg1, arg2));
+        return get_errno(target_munmap(arg1, arg2, 1));
     case TARGET_NR_mprotect:
         arg1 = cpu_untagged_addr(cpu, arg1);
         {
@@ -9758,24 +13206,55 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_mremap:
         arg1 = cpu_untagged_addr(cpu, arg1);
         /* mremap new_addr (arg5) is always untagged */
-        return get_errno(target_mremap(arg1, arg2, arg3, arg4, arg5));
+        return get_errno(target_mremap(arg1, arg2, arg3, arg4, arg5, 1));
 #endif
         /* ??? msync/mlock/munlock are broken for softmmu.  */
 #ifdef TARGET_NR_msync
     case TARGET_NR_msync:
-        return get_errno(msync(g2h(cpu, arg1), arg2, arg3));
+        {
+            if ((arg1 & ~TARGET_PAGE_MASK) != 0) {
+                return -TARGET_EINVAL;
+            }
+            if (!page_check_range(arg1, arg2, PAGE_VALID))
+                return -TARGET_ENOMEM;
+            return get_errno(target_msync(arg1, arg2, arg3));
+        }
+        return ret;
 #endif
 #ifdef TARGET_NR_mlock
     case TARGET_NR_mlock:
+    {
+        if (!page_check_range(arg1, arg2, PAGE_VALID))
+            return -TARGET_ENOMEM;
         return get_errno(mlock(g2h(cpu, arg1), arg2));
+    }
+#endif
+#ifdef TARGET_NR_mlock2
+    case TARGET_NR_mlock2:
+    {
+        if (!page_check_range(arg1, arg2, PAGE_VALID))
+            return -TARGET_ENOMEM;
+        return get_errno(mlock2(g2h(cpu, arg1), arg2, arg3));
+    }
 #endif
 #ifdef TARGET_NR_munlock
     case TARGET_NR_munlock:
+    {
+        if (!page_check_range(arg1, arg2, PAGE_VALID))
+            return -TARGET_ENOMEM;
         return get_errno(munlock(g2h(cpu, arg1), arg2));
+    }
 #endif
 #ifdef TARGET_NR_mlockall
     case TARGET_NR_mlockall:
-        return get_errno(mlockall(target_to_host_mlockall_arg(arg1)));
+    {
+        if (arg1 & ~(TARGET_MCL_CURRENT | TARGET_MCL_FUTURE | TARGET_MCL_ONFAULT)) {
+            return -TARGET_EINVAL;
+        } else {
+            ret = get_errno(mlockall(target_to_host_mlockall_arg(arg1)));
+        }
+    }
+    return ret;
 #endif
 #ifdef TARGET_NR_munlockall
     case TARGET_NR_munlockall:
@@ -9909,6 +13388,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_accept4:
         return do_accept4(arg1, arg2, arg3, arg4);
 #endif
+#ifdef TARGET_NR_perf_event_open
+    case TARGET_NR_perf_event_open:
+        return get_errno(syscall(__NR_perf_event_open, g2h_untagged(arg1), arg2,
+                        arg3, arg4, g2h_untagged(arg5)));
+#endif
 #ifdef TARGET_NR_bind
     case TARGET_NR_bind:
         return do_bind(arg1, arg2, arg3);
@@ -9955,11 +13439,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_sendmmsg
     case TARGET_NR_sendmmsg:
-        return do_sendrecvmmsg(arg1, arg2, arg3, arg4, 1);
+        return do_sendrecvmmsg(arg1, arg2, arg3, arg4, 1, NULL);
 #endif
 #ifdef TARGET_NR_recvmmsg
     case TARGET_NR_recvmmsg:
-        return do_sendrecvmmsg(arg1, arg2, arg3, arg4, 0);
+        return do_sendrecvmmsg(arg1, arg2, arg3, arg4, 0, (struct timespec *)(uintptr_t)arg5);
 #endif
 #ifdef TARGET_NR_sendto
     case TARGET_NR_sendto:
@@ -9993,41 +13477,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #if defined(TARGET_NR_syslog)
     case TARGET_NR_syslog:
-        {
-            int len = arg2;
-
-            switch (arg1) {
-            case TARGET_SYSLOG_ACTION_CLOSE:         /* Close log */
-            case TARGET_SYSLOG_ACTION_OPEN:          /* Open log */
-            case TARGET_SYSLOG_ACTION_CLEAR:         /* Clear ring buffer */
-            case TARGET_SYSLOG_ACTION_CONSOLE_OFF:   /* Disable logging */
-            case TARGET_SYSLOG_ACTION_CONSOLE_ON:    /* Enable logging */
-            case TARGET_SYSLOG_ACTION_CONSOLE_LEVEL: /* Set messages level */
-            case TARGET_SYSLOG_ACTION_SIZE_UNREAD:   /* Number of chars */
-            case TARGET_SYSLOG_ACTION_SIZE_BUFFER:   /* Size of the buffer */
-                return get_errno(sys_syslog((int)arg1, NULL, (int)arg3));
-            case TARGET_SYSLOG_ACTION_READ:          /* Read from log */
-            case TARGET_SYSLOG_ACTION_READ_CLEAR:    /* Read/clear msgs */
-            case TARGET_SYSLOG_ACTION_READ_ALL:      /* Read last messages */
-                {
-                    if (len < 0) {
-                        return -TARGET_EINVAL;
-                    }
-                    if (len == 0) {
-                        return 0;
-                    }
-                    p = lock_user(VERIFY_WRITE, arg2, arg3, 0);
-                    if (!p) {
-                        return -TARGET_EFAULT;
-                    }
-                    ret = get_errno(sys_syslog((int)arg1, p, (int)arg3));
-                    unlock_user(p, arg2, arg3);
-                }
-                return ret;
-            default:
-                return -TARGET_EINVAL;
-            }
-        }
+        p = lock_user_string(arg2);
+        return get_errno(sys_syslog(arg1, p, arg3));
         break;
 #endif
     case TARGET_NR_setitimer:
@@ -10088,7 +13539,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #ifdef TARGET_NR_fstat
     case TARGET_NR_fstat:
         {
-            ret = get_errno(fstat(arg1, &st));
+            ret = proc_self_fstat(arg1, &st);
+            if (ret) {
+                ret = get_errno(fstat(arg1, &st));
+            }
 #if defined(TARGET_NR_stat) || defined(TARGET_NR_lstat)
         do_stat:
 #endif
@@ -10120,6 +13574,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 __put_user(st.st_ctim.tv_nsec,
                            &target_st->target_st_ctime_nsec);
 #endif
+                /* workaround for wineserver64 + wine32 */
+                target_st->st_dev = target_st->st_dev & 0xffff;
                 unlock_user_struct(target_st, arg2, 1);
             }
         }
@@ -10144,6 +13600,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 rusage_ptr = &rusage;
             else
                 rusage_ptr = NULL;
+            if (arg3 & __WCLONE) {
+                arg3 |= __WALL;
+            }
             ret = get_errno(safe_wait4(arg1, &status, arg3, rusage_ptr));
             if (!is_error(ret)) {
                 if (status_ptr && ret) {
@@ -10275,6 +13734,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         /* new thread calls */
     case TARGET_NR_exit_group:
         preexit_cleanup(cpu_env, arg1);
+        /* dump basic block here. TODO */
+#ifdef CONFIG_LATX_AOT
+        aot_exit_entry(cpu, true);
+#endif
         return get_errno(exit_group(arg1));
 #endif
     case TARGET_NR_setdomainname:
@@ -10539,6 +14002,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                     de->d_reclen = tswap16(reclen);
                     tswap64s((uint64_t *)&de->d_ino);
                     tswap64s((uint64_t *)&de->d_off);
+                    #if TARGET_ABI_BITS == 32
+                    de->d_off = (int32_t)de->d_off;/*int32; Fix for ext4 filesystem*/
+                    de->d_ino = tswap32(de->d_ino);/*uint32; Fix for ext4 filesystem*/
+                    #endif
                     de = (struct linux_dirent64 *)((char *)de + reclen);
                     len -= reclen;
                 }
@@ -10580,10 +14047,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
     case TARGET_NR_writev:
         {
-            struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
+            struct iovec *vec = lock_iovec_remap(VERIFY_READ, arg2, arg3, 1);
             if (vec != NULL) {
                 ret = get_errno(safe_writev(arg1, vec, arg3));
-                unlock_iovec(vec, arg2, arg3, 0);
+                unlock_iovec_remap(vec, arg2, arg3, 0);
             } else {
                 ret = -host_to_target_errno(errno);
             }
@@ -10614,6 +14081,38 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
                 target_to_host_low_high(arg4, arg5, &low, &high);
                 ret = get_errno(safe_pwritev(arg1, vec, arg3, low, high));
+                unlock_iovec(vec, arg2, arg3, 0);
+            } else {
+                ret = -host_to_target_errno(errno);
+           }
+        }
+        return ret;
+#endif
+#if defined(TARGET_NR_preadv2)
+    case TARGET_NR_preadv2:
+        {
+            struct iovec *vec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
+            if (vec != NULL) {
+                unsigned long low, high;
+
+                target_to_host_low_high(arg4, arg5, &low, &high);
+                ret = get_errno(safe_preadv2(arg1, vec, arg3, low, high,arg6));
+                unlock_iovec(vec, arg2, arg3, 1);
+            } else {
+                ret = -host_to_target_errno(errno);
+           }
+        }
+        return ret;
+#endif
+#if defined(TARGET_NR_pwritev2)
+    case TARGET_NR_pwritev2:
+        {
+            struct iovec *vec = lock_iovec(VERIFY_READ, arg2, arg3, 1);
+            if (vec != NULL) {
+                unsigned long low, high;
+
+                target_to_host_low_high(arg4, arg5, &low, &high);
+                ret = get_errno(safe_pwritev2(arg1, vec, arg3, low, high, arg6));
                 unlock_iovec(vec, arg2, arg3, 0);
             } else {
                 ret = -host_to_target_errno(errno);
@@ -10797,7 +14296,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         case PR_GET_PDEATHSIG:
         {
             int deathsig;
-            ret = get_errno(prctl(arg1, &deathsig, arg3, arg4, arg5));
+            ret = get_errno(prctl(arg1, &deathsig, g2h_untagged(arg3),
+                                g2h_untagged(arg4), g2h_untagged(arg5)));
             if (!is_error(ret) && arg2
                 && put_user_s32(deathsig, arg2)) {
                 return -TARGET_EFAULT;
@@ -10811,8 +14311,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             if (!name) {
                 return -TARGET_EFAULT;
             }
-            ret = get_errno(prctl(arg1, (unsigned long)name,
-                                  arg3, arg4, arg5));
+            ret = get_errno(prctl(arg1, (unsigned long)name, g2h_untagged(arg3),
+                                g2h_untagged(arg4), g2h_untagged(arg5)));
             unlock_user(name, arg2, 16);
             return ret;
         }
@@ -10822,8 +14322,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             if (!name) {
                 return -TARGET_EFAULT;
             }
-            ret = get_errno(prctl(arg1, (unsigned long)name,
-                                  arg3, arg4, arg5));
+            ret = get_errno(prctl(arg1, (unsigned long)name, g2h_untagged(arg3),
+                                g2h_untagged(arg4), g2h_untagged(arg5)));
             unlock_user(name, arg2, 0);
             return ret;
         }
@@ -11075,7 +14575,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EINVAL;
         default:
             /* Most prctl options have no pointer arguments */
-            return get_errno(prctl(arg1, arg2, arg3, arg4, arg5));
+            return get_errno(prctl(arg1, g2h_untagged(arg2), g2h_untagged(arg3),
+                                    g2h_untagged(arg4), g2h_untagged(arg5)));
         }
         break;
 #ifdef TARGET_NR_arch_prctl
@@ -11088,34 +14589,34 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             arg4 = arg5;
             arg5 = arg6;
         }
-        if (arg2 == 0 && arg3 == 0) {
+        if (arg3 == 0) {
             /* Special-case NULL buffer and zero length, which should succeed */
             p = 0;
         } else {
-            p = lock_user(VERIFY_WRITE, arg2, arg3, 0);
+            p = lock_user_remap(VERIFY_WRITE, arg2, arg3, 0);
             if (!p) {
                 return -TARGET_EFAULT;
             }
         }
         ret = get_errno(pread64(arg1, p, arg3, target_offset64(arg4, arg5)));
-        unlock_user(p, arg2, ret);
+        unlock_user_remap(p, arg2, ret);
         return ret;
     case TARGET_NR_pwrite64:
         if (regpairs_aligned(cpu_env, num)) {
             arg4 = arg5;
             arg5 = arg6;
         }
-        if (arg2 == 0 && arg3 == 0) {
+        if (arg3 == 0) {
             /* Special-case NULL buffer and zero length, which should succeed */
             p = 0;
         } else {
-            p = lock_user(VERIFY_READ, arg2, arg3, 1);
+            p = lock_user_remap(VERIFY_READ, arg2, arg3, 1);
             if (!p) {
                 return -TARGET_EFAULT;
             }
         }
         ret = get_errno(pwrite64(arg1, p, arg3, target_offset64(arg4, arg5)));
-        unlock_user(p, arg2, 0);
+        unlock_user_remap(p, arg2, 0);
         return ret;
 #endif
     case TARGET_NR_getcwd:
@@ -11303,7 +14804,10 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_fstat64
     case TARGET_NR_fstat64:
-        ret = get_errno(fstat(arg1, &st));
+        ret = proc_self_fstat(arg1, &st);
+        if (ret) {
+            ret = get_errno(fstat(arg1, &st));
+        }
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg2, &st);
         return ret;
@@ -11319,6 +14823,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             return -TARGET_EFAULT;
         }
         ret = get_errno(fstatat(arg1, path(p), &st, arg4));
+
+        if (!strcmp((const char *)p, "self/task/")
+            || is_proc_myself((const char *)p, "task/"))
+            st.st_nlink--;
+
         unlock_user(p, arg2, 0);
         if (!is_error(ret))
             ret = host_to_target_stat64(cpu_env, arg3, &st);
@@ -11410,9 +14919,9 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return get_errno(high2lowgid(getegid()));
 #endif
     case TARGET_NR_setreuid:
-        return get_errno(setreuid(low2highuid(arg1), low2highuid(arg2)));
+        return get_errno(sys_setreuid(low2highuid(arg1), low2highuid(arg2)));
     case TARGET_NR_setregid:
-        return get_errno(setregid(low2highgid(arg1), low2highgid(arg2)));
+        return get_errno(sys_setregid(low2highgid(arg1), low2highgid(arg2)));
     case TARGET_NR_getgroups:
         {
             int gidsetsize = arg1;
@@ -11451,13 +14960,13 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
                 }
                 unlock_user(target_grouplist, arg2, 0);
             }
-            return get_errno(setgroups(gidsetsize, grouplist));
+            return get_errno(sys_setgroups(gidsetsize, grouplist));
         }
     case TARGET_NR_fchown:
         return get_errno(fchown(arg1, low2highuid(arg2), low2highgid(arg3)));
 #if defined(TARGET_NR_fchownat)
     case TARGET_NR_fchownat:
-        if (!(p = lock_user_string(arg2))) 
+        if (!(p = lock_user_string(arg2)))
             return -TARGET_EFAULT;
         ret = get_errno(fchownat(arg1, p, low2highuid(arg3),
                                  low2highgid(arg4), arg5));
@@ -11725,11 +15234,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #ifdef TARGET_NR_setreuid32
     case TARGET_NR_setreuid32:
-        return get_errno(setreuid(arg1, arg2));
+        return get_errno(sys_setreuid(arg1, arg2));
 #endif
 #ifdef TARGET_NR_setregid32
     case TARGET_NR_setregid32:
-        return get_errno(setregid(arg1, arg2));
+        return get_errno(sys_setregid(arg1, arg2));
 #endif
 #ifdef TARGET_NR_getgroups32
     case TARGET_NR_getgroups32:
@@ -11771,7 +15280,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             for(i = 0;i < gidsetsize; i++)
                 grouplist[i] = tswap32(target_grouplist[i]);
             unlock_user(target_grouplist, arg2, 0);
-            return get_errno(setgroups(gidsetsize, grouplist));
+            return get_errno(sys_setgroups(gidsetsize, grouplist));
         }
 #endif
 #ifdef TARGET_NR_fchown32
@@ -11838,16 +15347,63 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_setfsgid32:
         return get_errno(setfsgid(arg1));
 #endif
+#ifdef TARGET_NR_pivot_root
+    case TARGET_NR_pivot_root:
+        {
+            void *p2;
+            p = lock_user_string(arg1);
+            p2 = lock_user_string(arg2);
+            if (!p || !p2) {
+                ret = -TARGET_EFAULT;
+            } else {
+                ret = get_errno(safe_pivot_root(p, p2));
+            }
+            unlock_user(p2, arg2, 0);
+            unlock_user(p, arg1, 0);
+        }
+        return ret;
+#endif
 #ifdef TARGET_NR_mincore
     case TARGET_NR_mincore:
         {
+            if (arg1 & ~TARGET_PAGE_MASK) {
+                return -TARGET_EINVAL;
+            }
             void *a = lock_user(VERIFY_READ, arg1, arg2, 0);
+            if (!a) {
+                /* Support mincore for write only pages */
+                a = lock_user(PAGE_WRITE, arg1, arg2, 0);
+            }
             if (!a) {
                 return -TARGET_ENOMEM;
             }
             p = lock_user_string(arg3);
             if (!p) {
-                ret = -TARGET_EFAULT;
+                return -TARGET_EFAULT;
+            }
+
+            if (TARGET_PAGE_SIZE < qemu_host_page_size) {
+                int h_pages = DIV_ROUND_UP(arg2, qemu_host_page_size);
+                int g_pages = DIV_ROUND_UP(arg2, TARGET_PAGE_SIZE);
+                abi_ulong real_start = arg1 & qemu_host_page_mask;
+                abi_ulong offset, g_addr;
+                g_addr = arg1;
+                unsigned char *p2 = (unsigned char *)g_new0(char, h_pages);
+
+                ret = get_errno(mincore(g2h(cpu, real_start), arg2, p2));
+                for (int i = 0; i < g_pages; i++) {
+                    offset = g_addr - real_start;
+                    ((unsigned char *)p)[i] = 0;
+                    if (p2[offset / qemu_host_page_size]) {
+                        if (page_get_flags(g_addr) &&
+                           !(page_get_flags(g_addr) & PAGE_DONTNEED)) {
+                            ((unsigned char *)p)[i] = 1;
+                        }
+                    }
+                    g_addr += TARGET_PAGE_SIZE;
+                }
+                g_free(p2);
+                unlock_user(p, arg3, ret);
             } else {
                 ret = get_errno(mincore(a, arg2, p));
                 unlock_user(p, arg3, ret);
@@ -11938,7 +15494,113 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
            turns private file-backed mappings into anonymous mappings.
            This will break MADV_DONTNEED.
            This is a hint, so ignoring and returning success is ok.  */
-        return 0;
+	/* TODO: the commets above needs verify */
+        if((arg1 & ~TARGET_PAGE_MASK) || (arg2 < 0)) {
+            return -TARGET_EINVAL;
+        }
+        if (!page_check_range(arg1, arg2, PAGE_VALID))
+            return -TARGET_ENOMEM;
+
+        int prot = page_get_flags(arg1);
+        if ((TARGET_PAGE_SIZE < qemu_host_page_size)) {
+            if ((arg3 == MADV_DONTNEED) && (prot & PAGE_ANON)) {
+                abi_ulong addr;
+                abi_ulong start = arg1;
+                abi_ulong end = start + arg2;
+                abi_ulong real_start = arg1 & qemu_host_page_mask;
+                abi_ulong real_end = HOST_PAGE_ALIGN(end);
+                int prot_extra = PAGE_VALID | PAGE_DONTNEED;
+                ret = 0;
+
+                if (start > real_start) {
+                    abi_ulong tmp_end = MIN(end,
+                            real_start + qemu_host_page_size);
+
+                    mmap_lock();
+                    for (addr = start; addr < tmp_end; addr += TARGET_PAGE_SIZE) {
+                        prot = page_get_flags(addr);
+                        if (prot & PAGE_WRITE) {
+                            memset(g2h(cpu, addr), 0, TARGET_PAGE_SIZE);
+                        }
+                        if (prot & PAGE_VALID) {
+                            prot = (prot & (PAGE_BITS | PAGE_WRITE_ORG)) | prot_extra;
+                            page_set_flags(addr, addr + TARGET_PAGE_SIZE, prot);
+                        }
+                    }
+                    mmap_unlock();
+
+                    if (real_end == real_start + qemu_host_page_size) {
+                        return ret;
+                    }
+                    real_start += qemu_host_page_size;
+                }
+                if (end < real_end) {
+                    abi_ulong tmp_start = real_end - qemu_host_page_size;
+                    mmap_lock();
+                    for (addr = tmp_start; addr < end; addr += TARGET_PAGE_SIZE) {
+                        prot = page_get_flags(addr);
+                        if (prot & PAGE_WRITE) {
+                            memset(g2h(cpu, addr), 0, TARGET_PAGE_SIZE);
+                        }
+                        if (prot & PAGE_VALID) {
+                            prot = (prot & (PAGE_BITS | PAGE_WRITE_ORG)) | prot_extra;
+                            page_set_flags(addr, addr + TARGET_PAGE_SIZE, prot);
+                        }
+                    }
+                    mmap_unlock();
+                    real_end -= qemu_host_page_size;
+                }
+                if (real_start < real_end) {
+                    mmap_lock();
+                    for (addr = real_start; addr < real_end; addr += TARGET_PAGE_SIZE) {
+                        prot = page_get_flags(addr);
+                        if (prot & PAGE_VALID) {
+                            prot = (prot & (PAGE_BITS | PAGE_WRITE_ORG)) | prot_extra;
+                            page_set_flags(addr, addr + TARGET_PAGE_SIZE, prot);
+                        }
+                    }
+                    mmap_unlock();
+                    ret = get_errno(syscall(__NR_madvise, g2h_untagged(real_start),
+                                real_end - real_start, arg3));
+                }
+                return ret;
+            }
+
+            if ((arg3 == MADV_FREE) && (prot & PAGE_ANON)) {
+                abi_ulong addr;
+                abi_ulong start = arg1;
+                abi_ulong end = start + arg2;
+                abi_ulong real_start = arg1 & qemu_host_page_mask;
+                abi_ulong real_end = HOST_PAGE_ALIGN(end);
+                int prot_extra = PAGE_VALID | PAGE_DONTNEED;
+                ret = 0;
+
+                mmap_lock();
+                for (addr = real_start; addr < real_end; addr += TARGET_PAGE_SIZE) {
+                    prot = (page_get_flags(addr) & (PAGE_BITS | PAGE_WRITE_ORG)) | prot_extra;
+                    page_set_flags(addr, addr + TARGET_PAGE_SIZE, prot);
+                }
+                mmap_unlock();
+                if (start > real_start) {
+                    if (real_end == real_start + qemu_host_page_size) {
+                        return ret;
+                    }
+                    real_start += qemu_host_page_size;
+                }
+                if (end < real_end) {
+                    real_end -= qemu_host_page_size;
+                }
+                if (real_start < real_end) {
+                    ret = get_errno(syscall(__NR_madvise, g2h_untagged(real_start),
+                                real_end - real_start, arg3));
+                }
+                return ret;
+            } else {
+                return 0;
+            }
+        }
+
+        return get_errno(syscall(__NR_madvise, g2h_untagged(arg1), arg2, arg3));
 #endif
 #ifdef TARGET_NR_fcntl64
     case TARGET_NR_fcntl64:
@@ -12341,6 +16003,7 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 
 #ifdef TARGET_NR_set_robust_list
     case TARGET_NR_set_robust_list:
+         return get_errno(syscall(__NR_set_robust_list, arg1, arg2));
     case TARGET_NR_get_robust_list:
         /* The ABI for supporting robust futexes has userspace pass
          * the kernel a pointer to a linked list which is updated by
@@ -12354,7 +16017,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
          * holding a mutex that is shared with another process via
          * shared memory).
          */
-        return -TARGET_ENOSYS;
+        return get_errno(syscall(__NR_get_robust_list, arg1, g2h_untagged(arg2),
+                        g2h_untagged(arg3)));
 #endif
 
 #if defined(TARGET_NR_utimensat)
@@ -12422,7 +16086,8 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_futex_time64:
         return do_futex_time64(cpu, arg1, arg2, arg3, arg4, arg5, arg6);
 #endif
-#if defined(TARGET_NR_inotify_init) && defined(__NR_inotify_init)
+#if (defined(TARGET_NR_inotify_init) && defined(__NR_inotify_init)) || \
+defined(__loongarch__)
     case TARGET_NR_inotify_init:
         ret = get_errno(sys_inotify_init());
         if (ret >= 0) {
@@ -12452,7 +16117,45 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_inotify_rm_watch:
         return get_errno(sys_inotify_rm_watch(arg1, arg2));
 #endif
-
+#if defined(TARGET_NR_fanotify_init) && defined(__NR_fanotify_init)
+    case TARGET_NR_fanotify_init:
+        ret = get_errno(sys_fanotify_init(arg1, target_to_host_bitmask(arg2,
+                                          fcntl_flags_tbl)));
+        if (ret >= 0) {
+            fd_trans_register(ret, &target_fanotify_trans);
+        }
+        return ret;
+#endif
+#if defined(TARGET_NR_fanotify_mark) && defined(__NR_fanotify_mark)
+	case TARGET_NR_fanotify_mark:
+        p = lock_user_string(arg5);
+        ret = get_errno(sys_fanotify_mark(arg1, arg2, arg3, arg4, path(p)));
+        unlock_user(p, arg5, 0);
+        return ret;
+#endif
+#if defined(TARGET_NR_add_key) && defined(__NR_add_key)
+  case TARGET_NR_add_key:
+      {
+          return get_errno(syscall(__NR_add_key, g2h_untagged(arg1),
+                        g2h_untagged(arg2), g2h_untagged(arg3), arg4, arg5));
+      }
+#endif
+#if defined(TARGET_NR_keyctl) && defined(__NR_keyctl)
+  case TARGET_NR_keyctl:
+      {
+          return get_errno(syscall(__NR_keyctl, arg1, g2h_untagged(arg2),
+                                 g2h_untagged(arg3), g2h_untagged(arg4),
+                                 g2h_untagged(arg5), g2h_untagged(arg6)));
+      }
+#endif
+#if defined(TARGET_NR_request_key) && defined(__NR_request_key)
+  case TARGET_NR_request_key:
+      {
+          return get_errno(syscall(__NR_request_key, g2h_untagged(arg1),
+                                 g2h_untagged(arg2), g2h_untagged(arg3),
+                                 arg4));
+      }
+#endif
 #if defined(TARGET_NR_mq_open) && defined(__NR_mq_open)
     case TARGET_NR_mq_open:
         {
@@ -12586,6 +16289,20 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     /* Not implemented for now... */
 /*     case TARGET_NR_mq_notify: */
 /*         break; */
+    case TARGET_NR_mq_notify:
+        {
+            struct sigevent host_sevp = { {0}, }, *phost_sevp = NULL;
+            if (arg2) {
+                phost_sevp = &host_sevp;
+                ret = target_to_host_sigevent(phost_sevp, arg2);
+                if (ret != 0) {
+                    return ret;
+                }
+            }
+
+            ret = get_errno(syscall(__NR_mq_notify, arg1, phost_sevp));
+        }
+        break;
 
     case TARGET_NR_mq_getsetattr:
         {
@@ -12863,6 +16580,12 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
 #endif
 #endif
 #ifdef TARGET_NR_prlimit64
+#ifdef TARGET_HPPA
+#define STACK_GROWS_DOWN 0
+#endif /* TARGET_HPPA */
+#ifndef STACK_GROWS_DOWN
+#define STACK_GROWS_DOWN 1
+#endif
     case TARGET_NR_prlimit64:
     {
         /* args: pid, resource number, ptr to new rlimit, ptr to old rlimit */
@@ -12881,6 +16604,48 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             unlock_user_struct(target_rnew, arg3, 0);
             rnewp = &rnew;
         }
+        if (arg3 && resource == RLIMIT_STACK) {
+            if (!lock_user_struct(VERIFY_READ, target_rnew, arg3, 1)) {
+                return -TARGET_EFAULT;
+            }
+            rnew.rlim_cur = tswap64(target_rnew->rlim_cur);
+            rnew.rlim_max = tswap64(target_rnew->rlim_max);
+            if (rnew.rlim_cur > real_guest_stack_size) {
+#if defined(CONFIG_LATX_DEBUG)
+                fprintf(stderr, "WARNING: target stack size exceed 128m\n");
+#endif
+                rnew.rlim_cur = real_guest_stack_size;
+                /*return -TARGET_EFAULT;*/
+            }
+            TaskState *ts = cpu->opaque;
+            if (rnew.rlim_cur < vir_guest_stack_size) {
+                /* stack shrink is not emulated */
+                return 0;
+            }
+            if (STACK_GROWS_DOWN) {
+                target_mprotect(ts->info->stack_limit - (rnew.rlim_cur -
+                    vir_guest_stack_size), rnew.rlim_cur - vir_guest_stack_size,
+                    PROT_READ | PROT_WRITE);
+                ts->info->stack_limit -= rnew.rlim_cur - vir_guest_stack_size;
+            } else {
+                target_mprotect(ts->info->stack_limit + (rnew.rlim_cur -
+                    vir_guest_stack_size), rnew.rlim_cur - vir_guest_stack_size,
+                    PROT_READ | PROT_WRITE);
+                ts->info->stack_limit += rnew.rlim_cur - vir_guest_stack_size;
+            }
+            vir_guest_stack_size = rnew.rlim_cur;
+        }
+        if (option_prlimit && arg3 && (resource == RLIMIT_AS || resource == RLIMIT_DATA)) {
+            if (!lock_user_struct(VERIFY_READ, target_rnew, arg3, 1)) {
+                return -TARGET_EFAULT;
+            }
+            rnew.rlim_cur = tswap64(target_rnew->rlim_cur);
+            vir_rlimit_as_old = vir_rlimit_as;
+            vir_rlimit_as = rnew.rlim_cur;
+            if (vir_rlimit_as != RLIM_INFINITY) {
+                vir_rlimit_as_acc = 0;
+            }
+        }
 
         ret = get_errno(sys_prlimit64(arg1, resource, rnewp, arg4 ? &rold : 0));
         if (!is_error(ret) && arg4) {
@@ -12889,6 +16654,11 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
             }
             target_rold->rlim_cur = tswap64(rold.rlim_cur);
             target_rold->rlim_max = tswap64(rold.rlim_max);
+            if (option_prlimit && (resource == RLIMIT_AS || resource == RLIMIT_DATA)) {
+                target_rold->rlim_cur = tswap64(vir_rlimit_as_old);
+            } else if (resource == RLIMIT_STACK) {
+                target_rold->rlim_cur = tswap64(vir_guest_stack_size);
+            }
             unlock_user_struct(target_rold, arg4, 1);
         }
         return ret;
@@ -13226,7 +16996,59 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
     case TARGET_NR_membarrier:
         return get_errno(membarrier(arg1, arg2));
 #endif
+#if defined(TARGET_NR_delete_module) && defined(__NR_delete_module)
+    case TARGET_NR_delete_module:
+        return get_errno(syscall(__NR_delete_module, arg1, arg2));
+#endif
+#if defined(TARGET_NR_process_vm_readv) && defined(__NR_process_vm_readv)
+    case TARGET_NR_process_vm_readv:
+        {
+            struct iovec *lvec = lock_iovec(VERIFY_WRITE, arg2, arg3, 0);
+            struct iovec *rvec = lock_iovec(VERIFY_WRITE, arg4, arg5, 0);
 
+            if (lvec != NULL && rvec != NULL) {
+                ret = get_errno(safe_process_vm_readv(arg1, lvec, arg3, rvec,
+                                arg5 ,arg6));
+                unlock_iovec(lvec, arg2, arg3, 1);
+                unlock_iovec(rvec, arg4, arg5, 1);
+            } else {
+                ret = -host_to_target_errno(errno);
+            }
+        }
+        return ret;
+#endif
+#if defined(TARGET_NR_process_vm_writev) && defined(__NR_process_vm_writev)
+    case TARGET_NR_process_vm_writev:
+        {
+            struct iovec *lvec = lock_iovec(VERIFY_WRITE, arg2, arg3, 1);
+            struct iovec *rvec = lock_iovec(VERIFY_WRITE, arg4, arg5, 1);
+
+            if (lvec != NULL && rvec != NULL) {
+                ret = get_errno(safe_process_vm_writev(arg1, lvec, arg3, rvec,
+                                arg5 ,arg6));
+                unlock_iovec(lvec, arg2, arg3, 0);
+                unlock_iovec(rvec, arg4, arg5, 0);
+            } else {
+                ret = -host_to_target_errno(errno);
+            }
+        }
+        return ret;
+#endif
+#if defined(TARGET_NR_remap_file_pages) && defined(__NR_remap_file_pages)
+    case TARGET_NR_remap_file_pages:
+        return get_errno(syscall(__NR_remap_file_pages, g2h_untagged(arg1), arg2,
+                    arg3, arg4, arg5));
+#endif
+#if defined(TARGET_NR_sched_getattr) && defined(__NR_sched_getattr)
+    case TARGET_NR_sched_getattr:
+        return get_errno(syscall(__NR_sched_getattr, arg1, g2h_untagged(arg2),
+                            g2h_untagged(arg3), g2h_untagged(arg4)));
+#endif
+#if defined(TARGET_NR_sched_setattr) && defined(__NR_sched_setattr)
+    case TARGET_NR_sched_setattr:
+        return get_errno(syscall(__NR_sched_setattr, arg1, g2h_untagged(arg2),
+                            g2h_untagged(arg3)));
+#endif
 #if defined(TARGET_NR_copy_file_range) && defined(__NR_copy_file_range)
     case TARGET_NR_copy_file_range:
         {
@@ -13263,6 +17085,43 @@ static abi_long do_syscall1(void *cpu_env, int num, abi_long arg1,
         return ret;
 #endif
 
+#ifdef CONFIG_LATX_TUNNEL_LIB
+    case TUNNEL_VIRTUAL_SYSCALL_ID:
+        reg_priv_plt(arg1, arg2, arg3);
+        break;
+#endif
+#if TARGET_ABI_BITS == 32 && HOST_LONG_BITS == 64
+    case TARGET_NR_io_setup:
+        return do_io_setup(arg1, arg2);
+    case TARGET_NR_io_submit:
+        return do_io_submit(arg1, arg2, arg3);
+    case TARGET_NR_io_cancel:
+        return do_io_cancel(arg1, arg2, arg3);
+    case TARGET_NR_io_getevents:
+        return do_io_getevents(arg1, arg2, arg3, arg4, arg5);
+    case TARGET_NR_io_destroy:
+        return do_io_destroy(arg1);
+#else
+    case TARGET_NR_io_setup:
+        return get_errno(syscall(__NR_io_setup, arg1, arg2));
+    case TARGET_NR_io_submit:
+        return get_errno(syscall(__NR_io_submit, arg1, arg2, arg3));
+    case TARGET_NR_io_cancel:
+        return get_errno(syscall(__NR_io_cancel, arg1, arg2, arg3));
+    case TARGET_NR_io_getevents:
+        return get_errno(syscall(__NR_io_getevents, arg1, arg2, arg3, arg4, arg5));
+    case TARGET_NR_io_destroy:
+        return get_errno(syscall(__NR_io_destroy, arg1));
+#endif
+#if defined TARGET_NR_quotactl && defined __NR_quotactl
+    case TARGET_NR_quotactl:
+    /* only tested for X86_64 */
+#ifdef TARGET_X86_64
+        return get_errno(safe_quotactl(arg1, (const char *)arg2, arg3, (caddr_t)arg4));
+#else
+        return -TARGET_ENOSYS;
+#endif
+#endif
     default:
         qemu_log_mask(LOG_UNIMP, "Unsupported syscall: %d\n", num);
         return -TARGET_ENOSYS;
@@ -13277,7 +17136,13 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
 {
     CPUState *cpu = env_cpu(cpu_env);
     abi_long ret;
-
+#if defined(CONFIG_LATX_JRRA) || defined(CONFIG_LATX_JRRA_STACK)
+    /*GR2SCR scr0, zeor; for todo.*/
+    if (0) {
+        asm volatile (
+            ".word (0x77e00000 | (0 << 5) | (0)) \r\n");
+    }
+#endif
 #ifdef DEBUG_ERESTARTSYS
     /* Debug-only code for exercising the syscall-restart code paths
      * in the per-architecture cpu main loops: restart every syscall
@@ -13294,15 +17159,16 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
 
     record_syscall_start(cpu, num, arg1,
                          arg2, arg3, arg4, arg5, arg6, arg7, arg8);
-
-    if (unlikely(qemu_loglevel_mask(LOG_STRACE))) {
+    if (unlikely(qemu_loglevel_mask(LOG_STRACE)) ||
+        unlikely(qemu_loglevel_mask(LOG_STRACE_ERROR))) {
         print_syscall(cpu_env, num, arg1, arg2, arg3, arg4, arg5, arg6);
     }
 
     ret = do_syscall1(cpu_env, num, arg1, arg2, arg3, arg4,
                       arg5, arg6, arg7, arg8);
 
-    if (unlikely(qemu_loglevel_mask(LOG_STRACE))) {
+    if (unlikely(qemu_loglevel_mask(LOG_STRACE)) ||
+        unlikely(qemu_loglevel_mask(LOG_STRACE_ERROR))) {
         print_syscall_ret(cpu_env, num, ret, arg1, arg2,
                           arg3, arg4, arg5, arg6);
     }

@@ -62,7 +62,7 @@ static bool qapi_clone_start_list(Visitor *v, const char *name,
 static GenericList *qapi_clone_next_list(Visitor *v, GenericList *tail,
                                          size_t size)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /* Unshare the tail of the list cloned by g_memdup() */
@@ -80,7 +80,7 @@ static bool qapi_clone_start_alternate(Visitor *v, const char *name,
 static bool qapi_clone_type_int64(Visitor *v, const char *name, int64_t *obj,
                                   Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /* Value was already cloned by g_memdup() */
@@ -90,7 +90,7 @@ static bool qapi_clone_type_int64(Visitor *v, const char *name, int64_t *obj,
 static bool qapi_clone_type_uint64(Visitor *v, const char *name,
                                    uint64_t *obj, Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /* Value was already cloned by g_memdup() */
@@ -100,7 +100,7 @@ static bool qapi_clone_type_uint64(Visitor *v, const char *name,
 static bool qapi_clone_type_bool(Visitor *v, const char *name, bool *obj,
                                  Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /* Value was already cloned by g_memdup() */
@@ -110,7 +110,7 @@ static bool qapi_clone_type_bool(Visitor *v, const char *name, bool *obj,
 static bool qapi_clone_type_str(Visitor *v, const char *name, char **obj,
                                 Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /*
@@ -127,7 +127,7 @@ static bool qapi_clone_type_str(Visitor *v, const char *name, char **obj,
 static bool qapi_clone_type_number(Visitor *v, const char *name, double *obj,
                                    Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     /* Value was already cloned by g_memdup() */
@@ -137,7 +137,7 @@ static bool qapi_clone_type_number(Visitor *v, const char *name, double *obj,
 static bool qapi_clone_type_null(Visitor *v, const char *name, QNull **obj,
                                  Error **errp)
 {
-    QapiCloneVisitor *qcv = to_qcv(v);
+    QapiCloneVisitor *qcv __attribute__((unused)) = to_qcv(v);
 
     assert(qcv->depth);
     *obj = qnull();

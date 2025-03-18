@@ -134,7 +134,7 @@ static QString *parse_string(JSONParserContext *ctxt, JSONToken *token)
     const char *beg;
     int cp, trailing;
     char *end;
-    ssize_t len;
+    ssize_t len __attribute__((unused));
     char utf8_buf[5];
 
     assert(*ptr == '"' || *ptr == '\'');

@@ -87,11 +87,16 @@ extern TargetFdTrans target_packet_trans;
 extern TargetFdTrans target_netlink_route_trans;
 #endif
 extern TargetFdTrans target_netlink_audit_trans;
+extern TargetFdTrans target_netlink_crypto_trans;
 extern TargetFdTrans target_signalfd_trans;
 extern TargetFdTrans target_eventfd_trans;
 #if (defined(TARGET_NR_inotify_init) && defined(__NR_inotify_init)) || \
     (defined(CONFIG_INOTIFY1) && defined(TARGET_NR_inotify_init1) && \
      defined(__NR_inotify_init1))
 extern TargetFdTrans target_inotify_trans;
+#endif
+#if (defined(TARGET_NR_fanotify_init) && defined(__NR_fanotify_init) && \
+     defined(CONFIG_FANOTIFY))
+extern TargetFdTrans target_fanotify_trans;
 #endif
 #endif

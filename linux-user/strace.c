@@ -95,7 +95,7 @@ print_ipc_cmd(int cmd)
 {
 #define output_cmd(val) \
 if( cmd == val ) { \
-    qemu_log(#val); \
+    qemu_log_tmp(#val); \
     return; \
 }
 
@@ -135,7 +135,7 @@ if( cmd == val ) { \
     output_cmd( IPC_RMID );
 
     /* Some value we don't recognize */
-    qemu_log("%d", cmd);
+    qemu_log_tmp("%d", cmd);
 }
 
 static void
@@ -166,7 +166,7 @@ print_signal(abi_ulong arg, int last)
         print_raw_param("%ld", arg, last);
         return;
     }
-    qemu_log("%s%s", signal_name, get_comma(last));
+    qemu_log_tmp("%s%s", signal_name, get_comma(last));
 }
 
 static void print_si_code(int arg)
@@ -199,10 +199,10 @@ static void print_si_code(int arg)
         codename = "SI_TKILL";
         break;
     default:
-        qemu_log("%d", arg);
+        qemu_log_tmp("%d", arg);
         return;
     }
-    qemu_log("%s", codename);
+    qemu_log_tmp("%s", codename);
 }
 
 static void get_target_siginfo(target_siginfo_t *tinfo,
@@ -303,33 +303,33 @@ static void print_siginfo(const target_siginfo_t *tinfo)
     int si_type = extract32(tinfo->si_code, 16, 16);
     int si_code = sextract32(tinfo->si_code, 0, 16);
 
-    qemu_log("{si_signo=");
+    qemu_log_tmp("{si_signo=");
     print_signal(tinfo->si_signo, 1);
-    qemu_log(", si_code=");
+    qemu_log_tmp(", si_code=");
     print_si_code(si_code);
 
     switch (si_type) {
     case QEMU_SI_KILL:
-        qemu_log(", si_pid=%u, si_uid=%u",
+        qemu_log_tmp(", si_pid=%u, si_uid=%u",
                  (unsigned int)tinfo->_sifields._kill._pid,
                  (unsigned int)tinfo->_sifields._kill._uid);
         break;
     case QEMU_SI_TIMER:
-        qemu_log(", si_timer1=%u, si_timer2=%u",
+        qemu_log_tmp(", si_timer1=%u, si_timer2=%u",
                  tinfo->_sifields._timer._timer1,
                  tinfo->_sifields._timer._timer2);
         break;
     case QEMU_SI_POLL:
-        qemu_log(", si_band=%d, si_fd=%d",
+        qemu_log_tmp(", si_band=%d, si_fd=%d",
                  tinfo->_sifields._sigpoll._band,
                  tinfo->_sifields._sigpoll._fd);
         break;
     case QEMU_SI_FAULT:
-        qemu_log(", si_addr=");
+        qemu_log_tmp(", si_addr=");
         print_pointer(tinfo->_sifields._sigfault._addr, 1);
         break;
     case QEMU_SI_CHLD:
-        qemu_log(", si_pid=%u, si_uid=%u, si_status=%d"
+        qemu_log_tmp(", si_pid=%u, si_uid=%u, si_status=%d"
                  ", si_utime=" TARGET_ABI_FMT_ld
                  ", si_stime=" TARGET_ABI_FMT_ld,
                  (unsigned int)(tinfo->_sifields._sigchld._pid),
@@ -339,7 +339,7 @@ static void print_siginfo(const target_siginfo_t *tinfo)
                  tinfo->_sifields._sigchld._stime);
         break;
     case QEMU_SI_RT:
-        qemu_log(", si_pid=%u, si_uid=%u, si_sigval=" TARGET_ABI_FMT_ld,
+        qemu_log_tmp(", si_pid=%u, si_uid=%u, si_sigval=" TARGET_ABI_FMT_ld,
                  (unsigned int)tinfo->_sifields._rt._pid,
                  (unsigned int)tinfo->_sifields._rt._uid,
                  tinfo->_sifields._rt._sigval.sival_ptr);
@@ -347,7 +347,7 @@ static void print_siginfo(const target_siginfo_t *tinfo)
     default:
         g_assert_not_reached();
     }
-    qemu_log("}");
+    qemu_log_tmp("}");
 }
 
 static void
@@ -364,76 +364,76 @@ print_sockaddr(abi_ulong addr, abi_long addrlen, int last)
         case AF_UNIX: {
             struct target_sockaddr_un *un = (struct target_sockaddr_un *)sa;
             int i;
-            qemu_log("{sun_family=AF_UNIX,sun_path=\"");
+            qemu_log_tmp("{sun_family=AF_UNIX,sun_path=\"");
             for (i = 0; i < addrlen -
                             offsetof(struct target_sockaddr_un, sun_path) &&
                  un->sun_path[i]; i++) {
-                qemu_log("%c", un->sun_path[i]);
+                qemu_log_tmp("%c", un->sun_path[i]);
             }
-            qemu_log("\"}");
+            qemu_log_tmp("\"}");
             break;
         }
         case AF_INET: {
             struct target_sockaddr_in *in = (struct target_sockaddr_in *)sa;
             uint8_t *c = (uint8_t *)&in->sin_addr.s_addr;
-            qemu_log("{sin_family=AF_INET,sin_port=htons(%d),",
+            qemu_log_tmp("{sin_family=AF_INET,sin_port=htons(%d),",
                      ntohs(in->sin_port));
-            qemu_log("sin_addr=inet_addr(\"%d.%d.%d.%d\")",
+            qemu_log_tmp("sin_addr=inet_addr(\"%d.%d.%d.%d\")",
                      c[0], c[1], c[2], c[3]);
-            qemu_log("}");
+            qemu_log_tmp("}");
             break;
         }
         case AF_PACKET: {
             struct target_sockaddr_ll *ll = (struct target_sockaddr_ll *)sa;
             uint8_t *c = (uint8_t *)&ll->sll_addr;
-            qemu_log("{sll_family=AF_PACKET,"
+            qemu_log_tmp("{sll_family=AF_PACKET,"
                      "sll_protocol=htons(0x%04x),if%d,pkttype=",
                      ntohs(ll->sll_protocol), ll->sll_ifindex);
             switch (ll->sll_pkttype) {
             case PACKET_HOST:
-                qemu_log("PACKET_HOST");
+                qemu_log_tmp("PACKET_HOST");
                 break;
             case PACKET_BROADCAST:
-                qemu_log("PACKET_BROADCAST");
+                qemu_log_tmp("PACKET_BROADCAST");
                 break;
             case PACKET_MULTICAST:
-                qemu_log("PACKET_MULTICAST");
+                qemu_log_tmp("PACKET_MULTICAST");
                 break;
             case PACKET_OTHERHOST:
-                qemu_log("PACKET_OTHERHOST");
+                qemu_log_tmp("PACKET_OTHERHOST");
                 break;
             case PACKET_OUTGOING:
-                qemu_log("PACKET_OUTGOING");
+                qemu_log_tmp("PACKET_OUTGOING");
                 break;
             default:
-                qemu_log("%d", ll->sll_pkttype);
+                qemu_log_tmp("%d", ll->sll_pkttype);
                 break;
             }
-            qemu_log(",sll_addr=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
+            qemu_log_tmp(",sll_addr=%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
                      c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
-            qemu_log("}");
+            qemu_log_tmp("}");
             break;
         }
         case AF_NETLINK: {
             struct target_sockaddr_nl *nl = (struct target_sockaddr_nl *)sa;
-            qemu_log("{nl_family=AF_NETLINK,nl_pid=%u,nl_groups=%u}",
+            qemu_log_tmp("{nl_family=AF_NETLINK,nl_pid=%u,nl_groups=%u}",
                      tswap32(nl->nl_pid), tswap32(nl->nl_groups));
             break;
         }
         default:
-            qemu_log("{sa_family=%d, sa_data={", sa->sa_family);
+            qemu_log_tmp("{sa_family=%d, sa_data={", sa->sa_family);
             for (i = 0; i < 13; i++) {
-                qemu_log("%02x, ", sa->sa_data[i]);
+                qemu_log_tmp("%02x, ", sa->sa_data[i]);
             }
-            qemu_log("%02x}", sa->sa_data[i]);
-            qemu_log("}");
+            qemu_log_tmp("%02x}", sa->sa_data[i]);
+            qemu_log_tmp("}");
             break;
         }
         unlock_user(sa, addr, 0);
     } else {
         print_raw_param("0x"TARGET_ABI_FMT_lx, addr, 0);
     }
-    qemu_log(", "TARGET_ABI_FMT_ld"%s", addrlen, get_comma(last));
+    qemu_log_tmp(", "TARGET_ABI_FMT_ld"%s", addrlen, get_comma(last));
 }
 
 static void
@@ -441,19 +441,19 @@ print_socket_domain(int domain)
 {
     switch (domain) {
     case PF_UNIX:
-        qemu_log("PF_UNIX");
+        qemu_log_tmp("PF_UNIX");
         break;
     case PF_INET:
-        qemu_log("PF_INET");
+        qemu_log_tmp("PF_INET");
         break;
     case PF_NETLINK:
-        qemu_log("PF_NETLINK");
+        qemu_log_tmp("PF_NETLINK");
         break;
     case PF_PACKET:
-        qemu_log("PF_PACKET");
+        qemu_log_tmp("PF_PACKET");
         break;
     default:
-        qemu_log("%d", domain);
+        qemu_log_tmp("%d", domain);
         break;
     }
 }
@@ -463,29 +463,29 @@ print_socket_type(int type)
 {
     switch (type & TARGET_SOCK_TYPE_MASK) {
     case TARGET_SOCK_DGRAM:
-        qemu_log("SOCK_DGRAM");
+        qemu_log_tmp("SOCK_DGRAM");
         break;
     case TARGET_SOCK_STREAM:
-        qemu_log("SOCK_STREAM");
+        qemu_log_tmp("SOCK_STREAM");
         break;
     case TARGET_SOCK_RAW:
-        qemu_log("SOCK_RAW");
+        qemu_log_tmp("SOCK_RAW");
         break;
     case TARGET_SOCK_RDM:
-        qemu_log("SOCK_RDM");
+        qemu_log_tmp("SOCK_RDM");
         break;
     case TARGET_SOCK_SEQPACKET:
-        qemu_log("SOCK_SEQPACKET");
+        qemu_log_tmp("SOCK_SEQPACKET");
         break;
     case TARGET_SOCK_PACKET:
-        qemu_log("SOCK_PACKET");
+        qemu_log_tmp("SOCK_PACKET");
         break;
     }
     if (type & TARGET_SOCK_CLOEXEC) {
-        qemu_log("|SOCK_CLOEXEC");
+        qemu_log_tmp("|SOCK_CLOEXEC");
     }
     if (type & TARGET_SOCK_NONBLOCK) {
-        qemu_log("|SOCK_NONBLOCK");
+        qemu_log_tmp("|SOCK_NONBLOCK");
     }
 }
 
@@ -496,10 +496,10 @@ print_socket_protocol(int domain, int type, int protocol)
         (domain == AF_INET && type == TARGET_SOCK_PACKET)) {
         switch (protocol) {
         case 0x0003:
-            qemu_log("ETH_P_ALL");
+            qemu_log_tmp("ETH_P_ALL");
             break;
         default:
-            qemu_log("%d", protocol);
+            qemu_log_tmp("%d", protocol);
         }
         return;
     }
@@ -507,25 +507,25 @@ print_socket_protocol(int domain, int type, int protocol)
     if (domain == PF_NETLINK) {
         switch (protocol) {
         case NETLINK_ROUTE:
-            qemu_log("NETLINK_ROUTE");
+            qemu_log_tmp("NETLINK_ROUTE");
             break;
         case NETLINK_AUDIT:
-            qemu_log("NETLINK_AUDIT");
+            qemu_log_tmp("NETLINK_AUDIT");
             break;
         case NETLINK_NETFILTER:
-            qemu_log("NETLINK_NETFILTER");
+            qemu_log_tmp("NETLINK_NETFILTER");
             break;
         case NETLINK_KOBJECT_UEVENT:
-            qemu_log("NETLINK_KOBJECT_UEVENT");
+            qemu_log_tmp("NETLINK_KOBJECT_UEVENT");
             break;
         case NETLINK_RDMA:
-            qemu_log("NETLINK_RDMA");
+            qemu_log_tmp("NETLINK_RDMA");
             break;
         case NETLINK_CRYPTO:
-            qemu_log("NETLINK_CRYPTO");
+            qemu_log_tmp("NETLINK_CRYPTO");
             break;
         default:
-            qemu_log("%d", protocol);
+            qemu_log_tmp("%d", protocol);
             break;
         }
         return;
@@ -533,19 +533,19 @@ print_socket_protocol(int domain, int type, int protocol)
 
     switch (protocol) {
     case IPPROTO_IP:
-        qemu_log("IPPROTO_IP");
+        qemu_log_tmp("IPPROTO_IP");
         break;
     case IPPROTO_TCP:
-        qemu_log("IPPROTO_TCP");
+        qemu_log_tmp("IPPROTO_TCP");
         break;
     case IPPROTO_UDP:
-        qemu_log("IPPROTO_UDP");
+        qemu_log_tmp("IPPROTO_UDP");
         break;
     case IPPROTO_RAW:
-        qemu_log("IPPROTO_RAW");
+        qemu_log_tmp("IPPROTO_RAW");
         break;
     default:
-        qemu_log("%d", protocol);
+        qemu_log_tmp("%d", protocol);
         break;
     }
 }
@@ -558,7 +558,7 @@ print_fdset(int n, abi_ulong target_fds_addr)
     int i;
     int first = 1;
 
-    qemu_log("[");
+    qemu_log_tmp("[");
     if( target_fds_addr ) {
         abi_long *target_fds;
 
@@ -573,13 +573,13 @@ print_fdset(int n, abi_ulong target_fds_addr)
         for (i=n; i>=0; i--) {
             if ((tswapal(target_fds[i / TARGET_ABI_BITS]) >>
                 (i & (TARGET_ABI_BITS - 1))) & 1) {
-                qemu_log("%s%d", get_comma(first), i);
+                qemu_log_tmp("%s%d", get_comma(first), i);
                 first = 0;
             }
         }
         unlock_user(target_fds, target_fds_addr, 0);
     }
-    qemu_log("]");
+    qemu_log_tmp("]");
 }
 #endif
 
@@ -596,11 +596,11 @@ print_newselect(void *cpu_env, const struct syscallname *name,
 {
     print_syscall_prologue(name);
     print_fdset(arg1, arg2);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_fdset(arg1, arg3);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_fdset(arg1, arg4);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_timeval(arg5, 1);
     print_syscall_epilogue(name);
 }
@@ -612,10 +612,10 @@ print_semctl(void *cpu_env, const struct syscallname *name,
              abi_long arg1, abi_long arg2, abi_long arg3,
              abi_long arg4, abi_long arg5, abi_long arg6)
 {
-    qemu_log("%s(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ",",
+    qemu_log_tmp("%s(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ",",
              name->name, arg1, arg2);
     print_ipc_cmd(arg3);
-    qemu_log(",0x" TARGET_ABI_FMT_lx ")", arg4);
+    qemu_log_tmp(",0x" TARGET_ABI_FMT_lx ")", arg4);
 }
 #endif
 
@@ -629,7 +629,7 @@ print_execve(void *cpu_env, const struct syscallname *name,
 
     if (!(s = lock_user_string(arg1)))
         return;
-    qemu_log("%s(\"%s\",{", name->name, s);
+    qemu_log_tmp("%s(\"%s\",{", name->name, s);
     unlock_user(s, arg1, 0);
 
     for (arg_ptr_addr = arg2; ; arg_ptr_addr += sizeof(abi_ulong)) {
@@ -643,12 +643,12 @@ print_execve(void *cpu_env, const struct syscallname *name,
         if (!arg_addr)
             break;
         if ((s = lock_user_string(arg_addr))) {
-            qemu_log("\"%s\",", s);
+            qemu_log_tmp("\"%s\",", s);
             unlock_user(s, arg_addr, 0);
         }
     }
 
-    qemu_log("NULL})");
+    qemu_log_tmp("NULL})");
 }
 
 #ifdef TARGET_NR_ipc
@@ -659,13 +659,13 @@ print_ipc(void *cpu_env, const struct syscallname *name,
 {
     switch(arg1) {
     case IPCOP_semctl:
-        qemu_log("semctl(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ",",
+        qemu_log_tmp("semctl(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ",",
                  arg1, arg2);
         print_ipc_cmd(arg3);
-        qemu_log(",0x" TARGET_ABI_FMT_lx ")", arg4);
+        qemu_log_tmp(",0x" TARGET_ABI_FMT_lx ")", arg4);
         break;
     default:
-        qemu_log(("%s("
+        qemu_log_tmp(("%s("
                   TARGET_ABI_FMT_ld ","
                   TARGET_ABI_FMT_ld ","
                   TARGET_ABI_FMT_ld ","
@@ -685,11 +685,11 @@ print_syscall_err(abi_long ret)
 {
     const char *errstr;
 
-    qemu_log(" = ");
+    qemu_log_tmp(" = ");
     if (ret < 0) {
         errstr = target_strerror(-ret);
         if (errstr) {
-            qemu_log("-1 errno=%d (%s)", (int)-ret, errstr);
+            qemu_log_tmp("-1 errno=%d (%s)", (int)-ret, errstr);
             return true;
         }
     }
@@ -702,17 +702,18 @@ print_syscall_ret_addr(void *cpu_env, const struct syscallname *name,
                        abi_long arg2, abi_long arg3, abi_long arg4,
                        abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log("0x" TARGET_ABI_FMT_lx, ret);
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp("0x" TARGET_ABI_FMT_lx, ret);
     }
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 
 #if 0 /* currently unused */
 static void
 print_syscall_ret_raw(struct syscallname *name, abi_long ret)
 {
-        qemu_log(" = 0x" TARGET_ABI_FMT_lx "\n", ret);
+        qemu_log_tmp(" = 0x" TARGET_ABI_FMT_lx "\n", ret);
 }
 #endif
 
@@ -723,19 +724,20 @@ print_syscall_ret_newselect(void *cpu_env, const struct syscallname *name,
                             abi_long arg2, abi_long arg3, abi_long arg4,
                             abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(" = 0x" TARGET_ABI_FMT_lx " (", ret);
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(" = 0x" TARGET_ABI_FMT_lx " (", ret);
         print_fdset(arg0, arg1);
-        qemu_log(",");
+        qemu_log_tmp(",");
         print_fdset(arg0, arg2);
-        qemu_log(",");
+        qemu_log_tmp(",");
         print_fdset(arg0, arg3);
-        qemu_log(",");
+        qemu_log_tmp(",");
         print_timeval(arg4, 1);
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -753,31 +755,32 @@ print_syscall_ret_adjtimex(void *cpu_env, const struct syscallname *name,
                            abi_long arg2, abi_long arg3, abi_long arg4,
                            abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
         switch (ret) {
         case TARGET_TIME_OK:
-            qemu_log(" TIME_OK (clock synchronized, no leap second)");
+            qemu_log_tmp(" TIME_OK (clock synchronized, no leap second)");
             break;
         case TARGET_TIME_INS:
-            qemu_log(" TIME_INS (insert leap second)");
+            qemu_log_tmp(" TIME_INS (insert leap second)");
             break;
         case TARGET_TIME_DEL:
-            qemu_log(" TIME_DEL (delete leap second)");
+            qemu_log_tmp(" TIME_DEL (delete leap second)");
             break;
         case TARGET_TIME_OOP:
-            qemu_log(" TIME_OOP (leap second in progress)");
+            qemu_log_tmp(" TIME_OOP (leap second in progress)");
             break;
         case TARGET_TIME_WAIT:
-            qemu_log(" TIME_WAIT (leap second has occurred)");
+            qemu_log_tmp(" TIME_WAIT (leap second has occurred)");
             break;
         case TARGET_TIME_ERROR:
-            qemu_log(" TIME_ERROR (clock not synchronized)");
+            qemu_log_tmp(" TIME_ERROR (clock not synchronized)");
             break;
         }
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -788,14 +791,15 @@ print_syscall_ret_clock_gettime(void *cpu_env, const struct syscallname *name,
                                 abi_long arg2, abi_long arg3, abi_long arg4,
                                 abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
-        qemu_log(" (");
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
+        qemu_log_tmp(" (");
         print_timespec(arg1, 1);
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #define print_syscall_ret_clock_getres     print_syscall_ret_clock_gettime
 #endif
@@ -807,15 +811,16 @@ print_syscall_ret_gettimeofday(void *cpu_env, const struct syscallname *name,
                                abi_long arg2, abi_long arg3, abi_long arg4,
                                abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
-        qemu_log(" (");
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
+        qemu_log_tmp(" (");
         print_timeval(arg0, 0);
         print_timezone(arg1, 1);
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -826,14 +831,15 @@ print_syscall_ret_getitimer(void *cpu_env, const struct syscallname *name,
                             abi_long arg2, abi_long arg3, abi_long arg4,
                             abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
-        qemu_log(" (");
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
+        qemu_log_tmp(" (");
         print_itimerval(arg1, 1);
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -845,14 +851,15 @@ print_syscall_ret_setitimer(void *cpu_env, const struct syscallname *name,
                             abi_long arg2, abi_long arg3, abi_long arg4,
                             abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
-        qemu_log(" (old_value = ");
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
+        qemu_log_tmp(" (old_value = ");
         print_itimerval(arg2, 1);
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -864,26 +871,27 @@ print_syscall_ret_listxattr(void *cpu_env, const struct syscallname *name,
                             abi_long arg2, abi_long arg3, abi_long arg4,
                             abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
-        qemu_log(" (list = ");
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
+        qemu_log_tmp(" (list = ");
         if (arg1 != 0) {
             abi_long attr = arg1;
             while (ret) {
                 if (attr != arg1) {
-                    qemu_log(",");
+                    qemu_log_tmp(",");
                 }
                 print_string(attr, 1);
                 ret -= target_strlen(attr) + 1;
                 attr += target_strlen(attr) + 1;
             }
         } else {
-            qemu_log("NULL");
+            qemu_log_tmp("NULL");
         }
-        qemu_log(")");
+        qemu_log_tmp(")");
     }
 
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #define print_syscall_ret_llistxattr     print_syscall_ret_listxattr
 #define print_syscall_ret_flistxattr     print_syscall_ret_listxattr
@@ -896,8 +904,9 @@ print_syscall_ret_ioctl(void *cpu_env, const struct syscallname *name,
                         abi_long arg2, abi_long arg3, abi_long arg4,
                         abi_long arg5)
 {
-    if (!print_syscall_err(ret)) {
-        qemu_log(TARGET_ABI_FMT_ld, ret);
+    bool syscall_error = print_syscall_err(ret);
+    if (!syscall_error) {
+        qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
 
         const IOCTLEntry *ie;
         const argtype *arg_type;
@@ -913,7 +922,7 @@ print_syscall_ret_ioctl(void *cpu_env, const struct syscallname *name,
         if (ie->target_cmd == arg1 &&
            (ie->access == IOC_R || ie->access == IOC_RW)) {
             arg_type = ie->arg_type;
-            qemu_log(" (");
+            qemu_log_tmp(" (");
             arg_type++;
             target_size = thunk_type_size(arg_type, 0);
             argptr = lock_user(VERIFY_READ, arg2, target_size, 1);
@@ -923,10 +932,10 @@ print_syscall_ret_ioctl(void *cpu_env, const struct syscallname *name,
             } else {
                 print_pointer(arg2, 1);
             }
-            qemu_log(")");
+            qemu_log_tmp(")");
         }
     }
-    qemu_log("\n");
+    qemu_log_commit(syscall_error);
 }
 #endif
 
@@ -1425,12 +1434,12 @@ print_flags(const struct flags *f, abi_long flags, int last)
     int n;
 
     if ((flags == 0) && (f->f_value == 0)) {
-        qemu_log("%s%s", f->f_string, get_comma(last));
+        qemu_log_tmp("%s%s", f->f_string, get_comma(last));
         return;
     }
     for (n = 0; f->f_string != NULL; f++) {
         if ((f->f_value != 0) && ((flags & f->f_value) == f->f_value)) {
-            qemu_log("%s%s", sep, f->f_string);
+            qemu_log_tmp("%s%s", sep, f->f_string);
             flags &= ~f->f_value;
             sep = "|";
             n++;
@@ -1440,13 +1449,13 @@ print_flags(const struct flags *f, abi_long flags, int last)
     if (n > 0) {
         /* print rest of the flags as numeric */
         if (flags != 0) {
-            qemu_log("%s%#x%s", sep, (unsigned int)flags, get_comma(last));
+            qemu_log_tmp("%s%#x%s", sep, (unsigned int)flags, get_comma(last));
         } else {
-            qemu_log("%s", get_comma(last));
+            qemu_log_tmp("%s", get_comma(last));
         }
     } else {
         /* no string version of flags found, print them in hex then */
-        qemu_log("%#x%s", (unsigned int)flags, get_comma(last));
+        qemu_log_tmp("%#x%s", (unsigned int)flags, get_comma(last));
     }
 }
 
@@ -1455,16 +1464,16 @@ print_enums(const struct enums *e, abi_long enum_arg, int last)
 {
     for (; e->e_string != NULL; e++) {
         if (e->e_value == enum_arg) {
-            qemu_log("%s", e->e_string);
+            qemu_log_tmp("%s", e->e_string);
             break;
         }
     }
 
     if (e->e_string == NULL) {
-        qemu_log("%#x", (unsigned int)enum_arg);
+        qemu_log_tmp("%#x", (unsigned int)enum_arg);
     }
 
-    qemu_log("%s", get_comma(last));
+    qemu_log_tmp("%s", get_comma(last));
 }
 
 static void
@@ -1472,11 +1481,11 @@ print_at_dirfd(abi_long dirfd, int last)
 {
 #ifdef AT_FDCWD
     if (dirfd == AT_FDCWD) {
-        qemu_log("AT_FDCWD%s", get_comma(last));
+        qemu_log_tmp("AT_FDCWD%s", get_comma(last));
         return;
     }
 #endif
-    qemu_log("%d%s", (int)dirfd, get_comma(last));
+    qemu_log_tmp("%d%s", (int)dirfd, get_comma(last));
 }
 
 static void
@@ -1487,7 +1496,7 @@ print_file_mode(abi_long mode, int last)
 
     for (m = &mode_flags[0]; m->f_string != NULL; m++) {
         if ((m->f_value & mode) == m->f_value) {
-            qemu_log("%s%s", m->f_string, sep);
+            qemu_log_tmp("%s%s", m->f_string, sep);
             sep = "|";
             mode &= ~m->f_value;
             break;
@@ -1497,9 +1506,9 @@ print_file_mode(abi_long mode, int last)
     mode &= ~S_IFMT;
     /* print rest of the mode as octal */
     if (mode != 0)
-        qemu_log("%s%#o", sep, (unsigned int)mode);
+        qemu_log_tmp("%s%#o", sep, (unsigned int)mode);
 
-    qemu_log("%s", get_comma(last));
+    qemu_log_tmp("%s", get_comma(last));
 }
 
 static void
@@ -1508,17 +1517,17 @@ print_open_flags(abi_long flags, int last)
     print_flags(open_access_flags, flags & TARGET_O_ACCMODE, 1);
     flags &= ~TARGET_O_ACCMODE;
     if (flags == 0) {
-        qemu_log("%s", get_comma(last));
+        qemu_log_tmp("%s", get_comma(last));
         return;
     }
-    qemu_log("|");
+    qemu_log_tmp("|");
     print_flags(open_flags, flags, last);
 }
 
 static void
 print_syscall_prologue(const struct syscallname *sc)
 {
-    qemu_log("%s(", sc->name);
+    qemu_log_tmp("%s(", sc->name);
 }
 
 /*ARGSUSED*/
@@ -1526,7 +1535,7 @@ static void
 print_syscall_epilogue(const struct syscallname *sc)
 {
     (void)sc;
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void
@@ -1535,7 +1544,7 @@ print_string(abi_long addr, int last)
     char *s;
 
     if ((s = lock_user_string(addr)) != NULL) {
-        qemu_log("\"%s\"%s", s, get_comma(last));
+        qemu_log_tmp("\"%s\"%s", s, get_comma(last));
         unlock_user(s, addr, 0);
     } else {
         /* can't get string out of it, so print it as pointer */
@@ -1552,20 +1561,20 @@ print_buf(abi_long addr, abi_long len, int last)
 
     s = lock_user(VERIFY_READ, addr, len, 1);
     if (s) {
-        qemu_log("\"");
+        qemu_log_tmp("\"");
         for (i = 0; i < MAX_PRINT_BUF && i < len; i++) {
             if (isprint(s[i])) {
-                qemu_log("%c", s[i]);
+                qemu_log_tmp("%c", s[i]);
             } else {
-                qemu_log("\\%o", s[i]);
+                qemu_log_tmp("\\%o", s[i]);
             }
         }
-        qemu_log("\"");
+        qemu_log_tmp("\"");
         if (i != len) {
-            qemu_log("...");
+            qemu_log_tmp("...");
         }
         if (!last) {
-            qemu_log(",");
+            qemu_log_tmp(",");
         }
         unlock_user(s, addr, 0);
     } else {
@@ -1583,16 +1592,16 @@ print_raw_param(const char *fmt, abi_long param, int last)
     char format[64];
 
     (void) snprintf(format, sizeof (format), "%s%s", fmt, get_comma(last));
-    qemu_log(format, param);
+    qemu_log_tmp(format, param);
 }
 
 static void
 print_pointer(abi_long p, int last)
 {
     if (p == 0)
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
     else
-        qemu_log("0x" TARGET_ABI_FMT_lx "%s", p, get_comma(last));
+        qemu_log_tmp("0x" TARGET_ABI_FMT_lx "%s", p, get_comma(last));
 }
 
 /*
@@ -1603,12 +1612,12 @@ static void
 print_number(abi_long addr, int last)
 {
     if (addr == 0) {
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
     } else {
         int num;
 
         get_user_s32(num, addr);
-        qemu_log("[%d]%s", num, get_comma(last));
+        qemu_log_tmp("[%d]%s", num, get_comma(last));
     }
 }
 
@@ -1623,12 +1632,12 @@ print_timeval(abi_ulong tv_addr, int last)
             print_pointer(tv_addr, last);
             return;
         }
-        qemu_log("{tv_sec = " TARGET_ABI_FMT_ld
+        qemu_log_tmp("{tv_sec = " TARGET_ABI_FMT_ld
                  ",tv_usec = " TARGET_ABI_FMT_ld "}%s",
                  tswapal(tv->tv_sec), tswapal(tv->tv_usec), get_comma(last));
         unlock_user(tv, tv_addr, 0);
     } else
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
 }
 
 static void
@@ -1642,12 +1651,12 @@ print_timespec(abi_ulong ts_addr, int last)
             print_pointer(ts_addr, last);
             return;
         }
-        qemu_log("{tv_sec = " TARGET_ABI_FMT_ld
+        qemu_log_tmp("{tv_sec = " TARGET_ABI_FMT_ld
                  ",tv_nsec = " TARGET_ABI_FMT_ld "}%s",
                  tswapal(ts->tv_sec), tswapal(ts->tv_nsec), get_comma(last));
         unlock_user(ts, ts_addr, 0);
     } else {
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
     }
 }
 
@@ -1662,11 +1671,11 @@ print_timezone(abi_ulong tz_addr, int last)
             print_pointer(tz_addr, last);
             return;
         }
-        qemu_log("{%d,%d}%s", tswap32(tz->tz_minuteswest),
+        qemu_log_tmp("{%d,%d}%s", tswap32(tz->tz_minuteswest),
                  tswap32(tz->tz_dsttime), get_comma(last));
         unlock_user(tz, tz_addr, 0);
     } else {
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
     }
 }
 
@@ -1674,15 +1683,15 @@ static void
 print_itimerval(abi_ulong it_addr, int last)
 {
     if (it_addr) {
-        qemu_log("{it_interval=");
+        qemu_log_tmp("{it_interval=");
         print_timeval(it_addr +
                       offsetof(struct target_itimerval, it_interval), 0);
-        qemu_log("it_value=");
+        qemu_log_tmp("it_value=");
         print_timeval(it_addr +
                       offsetof(struct target_itimerval, it_value), 0);
-        qemu_log("}%s", get_comma(last));
+        qemu_log_tmp("}%s", get_comma(last));
     } else {
-        qemu_log("NULL%s", get_comma(last));
+        qemu_log_tmp("NULL%s", get_comma(last));
     }
 }
 
@@ -1696,12 +1705,12 @@ print_termios(void *arg)
     target_tcflag_t cflags = tswap32(target->c_cflag);
     target_tcflag_t lflags = tswap32(target->c_lflag);
 
-    qemu_log("{");
+    qemu_log_tmp("{");
 
-    qemu_log("c_iflag = ");
+    qemu_log_tmp("c_iflag = ");
     print_flags(termios_iflags, iflags, 0);
 
-    qemu_log("c_oflag = ");
+    qemu_log_tmp("c_oflag = ");
     target_tcflag_t oflags_clean =  oflags & ~(TARGET_NLDLY | TARGET_CRDLY |
                                                TARGET_TABDLY | TARGET_BSDLY |
                                                TARGET_VTDLY | TARGET_FFDLY);
@@ -1725,7 +1734,7 @@ print_termios(void *arg)
         print_enums(termios_oflags_FFDLY, oflags & TARGET_FFDLY, 0);
     }
 
-    qemu_log("c_cflag = ");
+    qemu_log_tmp("c_cflag = ");
     if (cflags & TARGET_CBAUD) {
         print_enums(termios_cflags_CBAUD, cflags & TARGET_CBAUD, 0);
     }
@@ -1735,16 +1744,16 @@ print_termios(void *arg)
     target_tcflag_t cflags_clean = cflags & ~(TARGET_CBAUD | TARGET_CSIZE);
     print_flags(termios_cflags, cflags_clean, 0);
 
-    qemu_log("c_lflag = ");
+    qemu_log_tmp("c_lflag = ");
     print_flags(termios_lflags, lflags, 0);
 
-    qemu_log("c_cc = ");
-    qemu_log("\"%s\",", target->c_cc);
+    qemu_log_tmp("c_cc = ");
+    qemu_log_tmp("\"%s\",", target->c_cc);
 
-    qemu_log("c_line = ");
+    qemu_log_tmp("c_line = ");
     print_raw_param("\'%c\'", target->c_line, 1);
 
-    qemu_log("}");
+    qemu_log_tmp("}");
 }
 
 #undef UNUSED
@@ -1998,120 +2007,120 @@ print_fcntl(void *cpu_env, const struct syscallname *name,
     print_raw_param("%d", arg0, 0);
     switch(arg1) {
     case TARGET_F_DUPFD:
-        qemu_log("F_DUPFD,");
+        qemu_log_tmp("F_DUPFD,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
     case TARGET_F_GETFD:
-        qemu_log("F_GETFD");
+        qemu_log_tmp("F_GETFD");
         break;
     case TARGET_F_SETFD:
-        qemu_log("F_SETFD,");
+        qemu_log_tmp("F_SETFD,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
     case TARGET_F_GETFL:
-        qemu_log("F_GETFL");
+        qemu_log_tmp("F_GETFL");
         break;
     case TARGET_F_SETFL:
-        qemu_log("F_SETFL,");
+        qemu_log_tmp("F_SETFL,");
         print_open_flags(arg2, 1);
         break;
     case TARGET_F_GETLK:
-        qemu_log("F_GETLK,");
+        qemu_log_tmp("F_GETLK,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_SETLK:
-        qemu_log("F_SETLK,");
+        qemu_log_tmp("F_SETLK,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_SETLKW:
-        qemu_log("F_SETLKW,");
+        qemu_log_tmp("F_SETLKW,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_GETOWN:
-        qemu_log("F_GETOWN");
+        qemu_log_tmp("F_GETOWN");
         break;
     case TARGET_F_SETOWN:
-        qemu_log("F_SETOWN,");
+        qemu_log_tmp("F_SETOWN,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 0);
         break;
     case TARGET_F_GETSIG:
-        qemu_log("F_GETSIG");
+        qemu_log_tmp("F_GETSIG");
         break;
     case TARGET_F_SETSIG:
-        qemu_log("F_SETSIG,");
+        qemu_log_tmp("F_SETSIG,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 0);
         break;
 #if TARGET_ABI_BITS == 32
     case TARGET_F_GETLK64:
-        qemu_log("F_GETLK64,");
+        qemu_log_tmp("F_GETLK64,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_SETLK64:
-        qemu_log("F_SETLK64,");
+        qemu_log_tmp("F_SETLK64,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_SETLKW64:
-        qemu_log("F_SETLKW64,");
+        qemu_log_tmp("F_SETLKW64,");
         print_pointer(arg2, 1);
         break;
 #endif
     case TARGET_F_OFD_GETLK:
-        qemu_log("F_OFD_GETLK,");
+        qemu_log_tmp("F_OFD_GETLK,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_OFD_SETLK:
-        qemu_log("F_OFD_SETLK,");
+        qemu_log_tmp("F_OFD_SETLK,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_OFD_SETLKW:
-        qemu_log("F_OFD_SETLKW,");
+        qemu_log_tmp("F_OFD_SETLKW,");
         print_pointer(arg2, 1);
         break;
     case TARGET_F_SETLEASE:
-        qemu_log("F_SETLEASE,");
+        qemu_log_tmp("F_SETLEASE,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
     case TARGET_F_GETLEASE:
-        qemu_log("F_GETLEASE");
+        qemu_log_tmp("F_GETLEASE");
         break;
 #ifdef F_DUPFD_CLOEXEC
     case TARGET_F_DUPFD_CLOEXEC:
-        qemu_log("F_DUPFD_CLOEXEC,");
+        qemu_log_tmp("F_DUPFD_CLOEXEC,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
 #endif
     case TARGET_F_NOTIFY:
-        qemu_log("F_NOTIFY,");
+        qemu_log_tmp("F_NOTIFY,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
 #ifdef F_GETOWN_EX
     case TARGET_F_GETOWN_EX:
-        qemu_log("F_GETOWN_EX,");
+        qemu_log_tmp("F_GETOWN_EX,");
         print_pointer(arg2, 1);
         break;
 #endif
 #ifdef F_SETOWN_EX
     case TARGET_F_SETOWN_EX:
-        qemu_log("F_SETOWN_EX,");
+        qemu_log_tmp("F_SETOWN_EX,");
         print_pointer(arg2, 1);
         break;
 #endif
 #ifdef F_SETPIPE_SZ
     case TARGET_F_SETPIPE_SZ:
-        qemu_log("F_SETPIPE_SZ,");
+        qemu_log_tmp("F_SETPIPE_SZ,");
         print_raw_param(TARGET_ABI_FMT_ld, arg2, 1);
         break;
     case TARGET_F_GETPIPE_SZ:
-        qemu_log("F_GETPIPE_SZ");
+        qemu_log_tmp("F_GETPIPE_SZ");
         break;
 #endif
 #ifdef F_ADD_SEALS
     case TARGET_F_ADD_SEALS:
-        qemu_log("F_ADD_SEALS,");
+        qemu_log_tmp("F_ADD_SEALS,");
         print_raw_param("0x"TARGET_ABI_FMT_lx, arg2, 1);
         break;
     case TARGET_F_GET_SEALS:
-        qemu_log("F_GET_SEALS");
+        qemu_log_tmp("F_GET_SEALS");
         break;
 #endif
     default:
@@ -2352,7 +2361,7 @@ print__llseek(void *cpu_env, const struct syscallname *name,
     case SEEK_CUR: whence = "SEEK_CUR"; break;
     case SEEK_END: whence = "SEEK_END"; break;
     }
-    qemu_log("%s", whence);
+    qemu_log_tmp("%s", whence);
     print_syscall_epilogue(name);
 }
 #endif
@@ -2368,18 +2377,18 @@ print_lseek(void *cpu_env, const struct syscallname *name,
     print_raw_param(TARGET_ABI_FMT_ld, arg1, 0);
     switch (arg2) {
     case SEEK_SET:
-        qemu_log("SEEK_SET"); break;
+        qemu_log_tmp("SEEK_SET"); break;
     case SEEK_CUR:
-        qemu_log("SEEK_CUR"); break;
+        qemu_log_tmp("SEEK_CUR"); break;
     case SEEK_END:
-        qemu_log("SEEK_END"); break;
+        qemu_log_tmp("SEEK_END"); break;
 #ifdef SEEK_DATA
     case SEEK_DATA:
-        qemu_log("SEEK_DATA"); break;
+        qemu_log_tmp("SEEK_DATA"); break;
 #endif
 #ifdef SEEK_HOLE
     case SEEK_HOLE:
-        qemu_log("SEEK_HOLE"); break;
+        qemu_log_tmp("SEEK_HOLE"); break;
 #endif
     default:
         print_raw_param("%#x", arg2, 1);
@@ -2457,9 +2466,9 @@ print_socket(void *cpu_env, const struct syscallname *name,
 
     print_syscall_prologue(name);
     print_socket_domain(domain);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_socket_type(type);
-    qemu_log(",");
+    qemu_log_tmp(",");
     if (domain == AF_PACKET ||
         (domain == AF_INET && type == TARGET_SOCK_PACKET)) {
         protocol = tswap16(protocol);
@@ -2491,17 +2500,17 @@ static void do_print_socket(const char *name, abi_long arg1)
     get_user_ualx(domain, arg1, 0);
     get_user_ualx(type, arg1, 1);
     get_user_ualx(protocol, arg1, 2);
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_socket_domain(domain);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_socket_type(type);
-    qemu_log(",");
+    qemu_log_tmp(",");
     if (domain == AF_PACKET ||
         (domain == AF_INET && type == TARGET_SOCK_PACKET)) {
         protocol = tswap16(protocol);
     }
     print_socket_protocol(domain, type, protocol);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_sockaddr(const char *name, abi_long arg1)
@@ -2512,10 +2521,10 @@ static void do_print_sockaddr(const char *name, abi_long arg1)
     get_user_ualx(addr, arg1, 1);
     get_user_ualx(addrlen, arg1, 2);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     print_sockaddr(addr, addrlen, 0);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_listen(const char *name, abi_long arg1)
@@ -2525,10 +2534,10 @@ static void do_print_listen(const char *name, abi_long arg1)
     get_user_ualx(sockfd, arg1, 0);
     get_user_ualx(backlog, arg1, 1);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     print_raw_param(TARGET_ABI_FMT_ld, backlog, 1);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_socketpair(const char *name, abi_long arg1)
@@ -2540,15 +2549,15 @@ static void do_print_socketpair(const char *name, abi_long arg1)
     get_user_ualx(protocol, arg1, 2);
     get_user_ualx(tab, arg1, 3);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_socket_domain(domain);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_socket_type(type);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_socket_protocol(domain, type, protocol);
-    qemu_log(",");
+    qemu_log_tmp(",");
     print_raw_param(TARGET_ABI_FMT_lx, tab, 1);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_sendrecv(const char *name, abi_long arg1)
@@ -2560,12 +2569,12 @@ static void do_print_sendrecv(const char *name, abi_long arg1)
     get_user_ualx(len, arg1, 2);
     get_user_ualx(flags, arg1, 3);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     print_buf(msg, len, 0);
     print_raw_param(TARGET_ABI_FMT_ld, len, 0);
     print_flags(msg_flags, flags, 1);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_msgaddr(const char *name, abi_long arg1)
@@ -2579,13 +2588,13 @@ static void do_print_msgaddr(const char *name, abi_long arg1)
     get_user_ualx(addr, arg1, 4);
     get_user_ualx(addrlen, arg1, 5);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     print_buf(msg, len, 0);
     print_raw_param(TARGET_ABI_FMT_ld, len, 0);
     print_flags(msg_flags, flags, 0);
     print_sockaddr(addr, addrlen, 0);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_shutdown(const char *name, abi_long arg1)
@@ -2595,23 +2604,23 @@ static void do_print_shutdown(const char *name, abi_long arg1)
     get_user_ualx(sockfd, arg1, 0);
     get_user_ualx(how, arg1, 1);
 
-    qemu_log("shutdown(");
+    qemu_log_tmp("shutdown(");
     print_sockfd(sockfd, 0);
     switch (how) {
     case SHUT_RD:
-        qemu_log("SHUT_RD");
+        qemu_log_tmp("SHUT_RD");
         break;
     case SHUT_WR:
-        qemu_log("SHUT_WR");
+        qemu_log_tmp("SHUT_WR");
         break;
     case SHUT_RDWR:
-        qemu_log("SHUT_RDWR");
+        qemu_log_tmp("SHUT_RDWR");
         break;
     default:
         print_raw_param(TARGET_ABI_FMT_ld, how, 1);
         break;
     }
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_msg(const char *name, abi_long arg1)
@@ -2622,11 +2631,11 @@ static void do_print_msg(const char *name, abi_long arg1)
     get_user_ualx(msg, arg1, 1);
     get_user_ualx(flags, arg1, 2);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     print_pointer(msg, 0);
     print_flags(msg_flags, flags, 1);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 static void do_print_sockopt(const char *name, abi_long arg1)
@@ -2639,118 +2648,123 @@ static void do_print_sockopt(const char *name, abi_long arg1)
     get_user_ualx(optval, arg1, 3);
     get_user_ualx(optlen, arg1, 4);
 
-    qemu_log("%s(", name);
+    qemu_log_tmp("%s(", name);
     print_sockfd(sockfd, 0);
     switch (level) {
+    case SOL_PACKET:
+        qemu_log_tmp("SOL_PACKET,");
+        print_raw_param(TARGET_ABI_FMT_ld, optname, 0);
+        print_pointer(optval, 0);
+        break;
     case SOL_TCP:
-        qemu_log("SOL_TCP,");
+        qemu_log_tmp("SOL_TCP,");
         print_raw_param(TARGET_ABI_FMT_ld, optname, 0);
         print_pointer(optval, 0);
         break;
     case SOL_UDP:
-        qemu_log("SOL_UDP,");
+        qemu_log_tmp("SOL_UDP,");
         print_raw_param(TARGET_ABI_FMT_ld, optname, 0);
         print_pointer(optval, 0);
         break;
     case SOL_IP:
-        qemu_log("SOL_IP,");
+        qemu_log_tmp("SOL_IP,");
         print_raw_param(TARGET_ABI_FMT_ld, optname, 0);
         print_pointer(optval, 0);
         break;
     case SOL_RAW:
-        qemu_log("SOL_RAW,");
+        qemu_log_tmp("SOL_RAW,");
         print_raw_param(TARGET_ABI_FMT_ld, optname, 0);
         print_pointer(optval, 0);
         break;
     case TARGET_SOL_SOCKET:
-        qemu_log("SOL_SOCKET,");
+        qemu_log_tmp("SOL_SOCKET,");
         switch (optname) {
         case TARGET_SO_DEBUG:
-            qemu_log("SO_DEBUG,");
+            qemu_log_tmp("SO_DEBUG,");
 print_optint:
             print_number(optval, 0);
             break;
         case TARGET_SO_REUSEADDR:
-            qemu_log("SO_REUSEADDR,");
+            qemu_log_tmp("SO_REUSEADDR,");
             goto print_optint;
         case TARGET_SO_REUSEPORT:
-            qemu_log("SO_REUSEPORT,");
+            qemu_log_tmp("SO_REUSEPORT,");
             goto print_optint;
         case TARGET_SO_TYPE:
-            qemu_log("SO_TYPE,");
+            qemu_log_tmp("SO_TYPE,");
             goto print_optint;
         case TARGET_SO_ERROR:
-            qemu_log("SO_ERROR,");
+            qemu_log_tmp("SO_ERROR,");
             goto print_optint;
         case TARGET_SO_DONTROUTE:
-            qemu_log("SO_DONTROUTE,");
+            qemu_log_tmp("SO_DONTROUTE,");
             goto print_optint;
         case TARGET_SO_BROADCAST:
-            qemu_log("SO_BROADCAST,");
+            qemu_log_tmp("SO_BROADCAST,");
             goto print_optint;
         case TARGET_SO_SNDBUF:
-            qemu_log("SO_SNDBUF,");
+            qemu_log_tmp("SO_SNDBUF,");
             goto print_optint;
         case TARGET_SO_RCVBUF:
-            qemu_log("SO_RCVBUF,");
+            qemu_log_tmp("SO_RCVBUF,");
             goto print_optint;
         case TARGET_SO_KEEPALIVE:
-            qemu_log("SO_KEEPALIVE,");
+            qemu_log_tmp("SO_KEEPALIVE,");
             goto print_optint;
         case TARGET_SO_OOBINLINE:
-            qemu_log("SO_OOBINLINE,");
+            qemu_log_tmp("SO_OOBINLINE,");
             goto print_optint;
         case TARGET_SO_NO_CHECK:
-            qemu_log("SO_NO_CHECK,");
+            qemu_log_tmp("SO_NO_CHECK,");
             goto print_optint;
         case TARGET_SO_PRIORITY:
-            qemu_log("SO_PRIORITY,");
+            qemu_log_tmp("SO_PRIORITY,");
             goto print_optint;
         case TARGET_SO_BSDCOMPAT:
-            qemu_log("SO_BSDCOMPAT,");
+            qemu_log_tmp("SO_BSDCOMPAT,");
             goto print_optint;
         case TARGET_SO_PASSCRED:
-            qemu_log("SO_PASSCRED,");
+            qemu_log_tmp("SO_PASSCRED,");
             goto print_optint;
         case TARGET_SO_TIMESTAMP:
-            qemu_log("SO_TIMESTAMP,");
+            qemu_log_tmp("SO_TIMESTAMP,");
             goto print_optint;
         case TARGET_SO_RCVLOWAT:
-            qemu_log("SO_RCVLOWAT,");
+            qemu_log_tmp("SO_RCVLOWAT,");
             goto print_optint;
         case TARGET_SO_RCVTIMEO:
-            qemu_log("SO_RCVTIMEO,");
+            qemu_log_tmp("SO_RCVTIMEO,");
             print_timeval(optval, 0);
             break;
         case TARGET_SO_SNDTIMEO:
-            qemu_log("SO_SNDTIMEO,");
+            qemu_log_tmp("SO_SNDTIMEO,");
             print_timeval(optval, 0);
             break;
         case TARGET_SO_ATTACH_FILTER: {
             struct target_sock_fprog *fprog;
 
-            qemu_log("SO_ATTACH_FILTER,");
+            qemu_log_tmp("SO_ATTACH_FILTER,");
 
             if (lock_user_struct(VERIFY_READ, fprog, optval,  0)) {
                 struct target_sock_filter *filter;
-                qemu_log("{");
+                qemu_log_tmp("{");
                 if (lock_user_struct(VERIFY_READ, filter,
                                      tswapal(fprog->filter),  0)) {
                     int i;
                     for (i = 0; i < tswap16(fprog->len) - 1; i++) {
-                        qemu_log("[%d]{0x%x,%d,%d,0x%x},",
+                        qemu_log_tmp("[%d]{0x%x,%d,%d,0x%x},",
                                  i, tswap16(filter[i].code),
                                  filter[i].jt, filter[i].jf,
                                  tswap32(filter[i].k));
                     }
-                    qemu_log("[%d]{0x%x,%d,%d,0x%x}",
+                    qemu_log_tmp("[%d]{0x%x,%d,%d,0x%x}",
                              i, tswap16(filter[i].code),
                              filter[i].jt, filter[i].jf,
                              tswap32(filter[i].k));
                 } else {
-                    qemu_log(TARGET_ABI_FMT_lx, tswapal(fprog->filter));
+                    qemu_log_tmp(TARGET_ABI_FMT_lx, tswapal(fprog->filter));
                 }
-                qemu_log(",%d},", tswap16(fprog->len));
+                qemu_log_tmp(",%d},", tswap16(fprog->len));
                 unlock_user(fprog, optval, 0);
             } else {
                 print_pointer(optval, 0);
@@ -2764,104 +2778,104 @@ print_optint:
         }
         break;
     case SOL_IPV6:
-        qemu_log("SOL_IPV6,");
+        qemu_log_tmp("SOL_IPV6,");
         switch (optname) {
         case IPV6_MTU_DISCOVER:
-            qemu_log("IPV6_MTU_DISCOVER,");
+            qemu_log_tmp("IPV6_MTU_DISCOVER,");
             goto print_optint;
         case IPV6_MTU:
-            qemu_log("IPV6_MTU,");
+            qemu_log_tmp("IPV6_MTU,");
             goto print_optint;
         case IPV6_V6ONLY:
-            qemu_log("IPV6_V6ONLY,");
+            qemu_log_tmp("IPV6_V6ONLY,");
             goto print_optint;
         case IPV6_RECVPKTINFO:
-            qemu_log("IPV6_RECVPKTINFO,");
+            qemu_log_tmp("IPV6_RECVPKTINFO,");
             goto print_optint;
         case IPV6_UNICAST_HOPS:
-            qemu_log("IPV6_UNICAST_HOPS,");
+            qemu_log_tmp("IPV6_UNICAST_HOPS,");
             goto print_optint;
         case IPV6_MULTICAST_HOPS:
-            qemu_log("IPV6_MULTICAST_HOPS,");
+            qemu_log_tmp("IPV6_MULTICAST_HOPS,");
             goto print_optint;
         case IPV6_MULTICAST_LOOP:
-            qemu_log("IPV6_MULTICAST_LOOP,");
+            qemu_log_tmp("IPV6_MULTICAST_LOOP,");
             goto print_optint;
         case IPV6_RECVERR:
-            qemu_log("IPV6_RECVERR,");
+            qemu_log_tmp("IPV6_RECVERR,");
             goto print_optint;
         case IPV6_RECVHOPLIMIT:
-            qemu_log("IPV6_RECVHOPLIMIT,");
+            qemu_log_tmp("IPV6_RECVHOPLIMIT,");
             goto print_optint;
         case IPV6_2292HOPLIMIT:
-            qemu_log("IPV6_2292HOPLIMIT,");
+            qemu_log_tmp("IPV6_2292HOPLIMIT,");
             goto print_optint;
         case IPV6_CHECKSUM:
-            qemu_log("IPV6_CHECKSUM,");
+            qemu_log_tmp("IPV6_CHECKSUM,");
             goto print_optint;
         case IPV6_ADDRFORM:
-            qemu_log("IPV6_ADDRFORM,");
+            qemu_log_tmp("IPV6_ADDRFORM,");
             goto print_optint;
         case IPV6_2292PKTINFO:
-            qemu_log("IPV6_2292PKTINFO,");
+            qemu_log_tmp("IPV6_2292PKTINFO,");
             goto print_optint;
         case IPV6_RECVTCLASS:
-            qemu_log("IPV6_RECVTCLASS,");
+            qemu_log_tmp("IPV6_RECVTCLASS,");
             goto print_optint;
         case IPV6_RECVRTHDR:
-            qemu_log("IPV6_RECVRTHDR,");
+            qemu_log_tmp("IPV6_RECVRTHDR,");
             goto print_optint;
         case IPV6_2292RTHDR:
-            qemu_log("IPV6_2292RTHDR,");
+            qemu_log_tmp("IPV6_2292RTHDR,");
             goto print_optint;
         case IPV6_RECVHOPOPTS:
-            qemu_log("IPV6_RECVHOPOPTS,");
+            qemu_log_tmp("IPV6_RECVHOPOPTS,");
             goto print_optint;
         case IPV6_2292HOPOPTS:
-            qemu_log("IPV6_2292HOPOPTS,");
+            qemu_log_tmp("IPV6_2292HOPOPTS,");
             goto print_optint;
         case IPV6_RECVDSTOPTS:
-            qemu_log("IPV6_RECVDSTOPTS,");
+            qemu_log_tmp("IPV6_RECVDSTOPTS,");
             goto print_optint;
         case IPV6_2292DSTOPTS:
-            qemu_log("IPV6_2292DSTOPTS,");
+            qemu_log_tmp("IPV6_2292DSTOPTS,");
             goto print_optint;
         case IPV6_TCLASS:
-            qemu_log("IPV6_TCLASS,");
+            qemu_log_tmp("IPV6_TCLASS,");
             goto print_optint;
         case IPV6_ADDR_PREFERENCES:
-            qemu_log("IPV6_ADDR_PREFERENCES,");
+            qemu_log_tmp("IPV6_ADDR_PREFERENCES,");
             goto print_optint;
 #ifdef IPV6_RECVPATHMTU
         case IPV6_RECVPATHMTU:
-            qemu_log("IPV6_RECVPATHMTU,");
+            qemu_log_tmp("IPV6_RECVPATHMTU,");
             goto print_optint;
 #endif
 #ifdef IPV6_TRANSPARENT
         case IPV6_TRANSPARENT:
-            qemu_log("IPV6_TRANSPARENT,");
+            qemu_log_tmp("IPV6_TRANSPARENT,");
             goto print_optint;
 #endif
 #ifdef IPV6_FREEBIND
         case IPV6_FREEBIND:
-            qemu_log("IPV6_FREEBIND,");
+            qemu_log_tmp("IPV6_FREEBIND,");
             goto print_optint;
 #endif
 #ifdef IPV6_RECVORIGDSTADDR
         case IPV6_RECVORIGDSTADDR:
-            qemu_log("IPV6_RECVORIGDSTADDR,");
+            qemu_log_tmp("IPV6_RECVORIGDSTADDR,");
             goto print_optint;
 #endif
         case IPV6_PKTINFO:
-            qemu_log("IPV6_PKTINFO,");
+            qemu_log_tmp("IPV6_PKTINFO,");
             print_pointer(optval, 0);
             break;
         case IPV6_ADD_MEMBERSHIP:
-            qemu_log("IPV6_ADD_MEMBERSHIP,");
+            qemu_log_tmp("IPV6_ADD_MEMBERSHIP,");
             print_pointer(optval, 0);
             break;
         case IPV6_DROP_MEMBERSHIP:
-            qemu_log("IPV6_DROP_MEMBERSHIP,");
+            qemu_log_tmp("IPV6_DROP_MEMBERSHIP,");
             print_pointer(optval, 0);
             break;
         default:
@@ -2877,7 +2891,7 @@ print_optint:
         break;
     }
     print_raw_param(TARGET_ABI_FMT_ld, optlen, 1);
-    qemu_log(")");
+    qemu_log_tmp(")");
 }
 
 #define PRINT_SOCKOP(name, func) \
@@ -2927,6 +2941,7 @@ print_socketcall(void *cpu_env, const struct syscallname *name,
     print_raw_param(TARGET_ABI_FMT_ld, arg5, 0);
     print_syscall_epilogue(name);
 }
+
 #endif
 
 #if defined(TARGET_NR_bind)
@@ -3039,7 +3054,7 @@ print_rt_sigprocmask(void *cpu_env, const struct syscallname *name,
     case TARGET_SIG_UNBLOCK: how = "SIG_UNBLOCK"; break;
     case TARGET_SIG_SETMASK: how = "SIG_SETMASK"; break;
     }
-    qemu_log("%s,", how);
+    qemu_log_tmp("%s,", how);
     print_pointer(arg1, 0);
     print_pointer(arg2, 1);
     print_syscall_epilogue(name);
@@ -3153,7 +3168,7 @@ print_syslog_action(abi_ulong arg, int last)
             return;
         }
     }
-    qemu_log("%s%s", type, get_comma(last));
+    qemu_log_tmp("%s%s", type, get_comma(last));
 }
 
 static void
@@ -3516,7 +3531,7 @@ print_mmap(void *cpu_env, const struct syscallname *name,
 {
     print_syscall_prologue(name);
     print_pointer(arg0, 0);
-    print_raw_param("%d", arg1, 0);
+    print_raw_param("%zx", arg1, 0);
     print_flags(mmap_prot_flags, arg2, 0);
     print_flags(mmap_flags, arg3, 0);
     print_raw_param("%d", arg4, 0);
@@ -3558,20 +3573,20 @@ static void print_futex_op(abi_long tflag, int last)
 {
 #define print_op(val) \
 if( cmd == val ) { \
-    qemu_log(#val); \
+    qemu_log_tmp(#val); \
     return; \
 }
 
     int cmd = (int)tflag;
 #ifdef FUTEX_PRIVATE_FLAG
     if (cmd & FUTEX_PRIVATE_FLAG) {
-        qemu_log("FUTEX_PRIVATE_FLAG|");
+        qemu_log_tmp("FUTEX_PRIVATE_FLAG|");
         cmd &= ~FUTEX_PRIVATE_FLAG;
     }
 #endif
 #ifdef FUTEX_CLOCK_REALTIME
     if (cmd & FUTEX_CLOCK_REALTIME) {
-        qemu_log("FUTEX_CLOCK_REALTIME|");
+        qemu_log_tmp("FUTEX_CLOCK_REALTIME|");
         cmd &= ~FUTEX_CLOCK_REALTIME;
     }
 #endif
@@ -3591,7 +3606,7 @@ if( cmd == val ) { \
     print_op(FUTEX_WAKE_BITSET)
 #endif
     /* unknown values */
-    qemu_log("%d", cmd);
+    qemu_log_tmp("%d", cmd);
 }
 
 static void
@@ -3690,11 +3705,11 @@ print_ioctl(void *cpu_env, const struct syscallname *name,
         print_raw_param("%#x", arg1, 0);
         print_raw_param("%#x", arg2, 1);
     } else {
-        qemu_log("%s", ie->name);
+        qemu_log_tmp("%s", ie->name);
         arg_type = ie->arg_type;
 
         if (arg_type[0] != TYPE_NULL) {
-            qemu_log(",");
+            qemu_log_tmp(",");
 
             switch (arg_type[0]) {
             case TYPE_PTRVOID:
@@ -3760,7 +3775,8 @@ print_syscall(void *cpu_env, int num,
     int i;
     const char *format="%s(" TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld "," TARGET_ABI_FMT_ld ")";
 
-    qemu_log("%d ", getpid());
+    qemu_log_reset();
+    qemu_log_tmp("%d ", getpid());
 
     for(i=0;i<nsyscalls;i++)
         if( scnames[i].nr == num ) {
@@ -3772,12 +3788,14 @@ print_syscall(void *cpu_env, int num,
                    host types and host pointers for strings */
                 if( scnames[i].format != NULL )
                     format = scnames[i].format;
-                qemu_log(format,
+                qemu_log_tmp(format,
                          scnames[i].name, arg1, arg2, arg3, arg4, arg5, arg6);
             }
             return;
         }
-    qemu_log("Unknown syscall %d\n", num);
+    if(num != 600) {
+        qemu_log_tmp("Unknown syscall %d\n", num);
+    }
 }
 
 
@@ -3795,10 +3813,11 @@ print_syscall_ret(void *cpu_env, int num, abi_long ret,
                                   arg1, arg2, arg3,
                                   arg4, arg5, arg6);
             } else {
-                if (!print_syscall_err(ret)) {
-                    qemu_log(TARGET_ABI_FMT_ld, ret);
+                bool syscall_error = print_syscall_err(ret);
+                if (!syscall_error) {
+                    qemu_log_tmp(TARGET_ABI_FMT_ld, ret);
                 }
-                qemu_log("\n");
+                qemu_log_commit(syscall_error);
             }
             break;
         }

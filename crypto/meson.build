@@ -40,12 +40,6 @@ crypto_ss.add(when: 'CONFIG_QEMU_PRIVATE_XTS', if_true: files('xts.c'))
 crypto_ss.add(when: 'CONFIG_AF_ALG', if_true: files('afalg.c', 'cipher-afalg.c', 'hash-afalg.c'))
 crypto_ss.add(when: 'CONFIG_GNUTLS', if_true: files('tls-cipher-suites.c'))
 
-if 'CONFIG_NETTLE' in config_host
-  crypto_ss.add(nettle)
-elif 'CONFIG_GCRYPT' in config_host
-  crypto_ss.add(gcrypt)
-endif
-
 if 'CONFIG_GNUTLS' in config_host
   crypto_ss.add(gnutls)
 endif

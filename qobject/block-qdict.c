@@ -224,9 +224,9 @@ void qdict_array_split(QDict *src, QList **dst)
     for (i = 0; i < UINT_MAX; i++) {
         QObject *subqobj;
         bool is_subqdict;
-        QDict *subqdict;
+        QDict *subqdict = NULL;
         char indexstr[32], prefix[32];
-        size_t snprintf_ret;
+        size_t snprintf_ret __attribute__((unused));
 
         snprintf_ret = snprintf(indexstr, 32, "%u", i);
         assert(snprintf_ret < 32);
@@ -598,7 +598,7 @@ int qdict_array_entries(QDict *src, const char *subqdict)
     const QDictEntry *entry;
     unsigned i;
     unsigned entries = 0;
-    size_t subqdict_len = strlen(subqdict);
+    size_t subqdict_len __attribute__((unused)) = strlen(subqdict);
 
     assert(!subqdict_len || subqdict[subqdict_len - 1] == '.');
 

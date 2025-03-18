@@ -18,8 +18,12 @@
 #include <sys/signalfd.h>
 #include <linux/unistd.h>
 #include <linux/audit.h>
+#include <linux/cryptouser.h>
 #ifdef CONFIG_INOTIFY
 #include <sys/inotify.h>
+#endif
+#ifdef CONFIG_FANOTIFY
+#include <sys/fanotify.h>
 #endif
 #include <linux/netlink.h>
 #ifdef CONFIG_RTNETLINK
@@ -192,6 +196,31 @@ enum {
     QEMU_IFLA_TUN_NUM_QUEUES,
     QEMU_IFLA_TUN_NUM_DISABLED_QUEUES,
     QEMU___IFLA_TUN_MAX,
+};
+
+enum {
+    QEMU_IFLA_IPTUN_UNSPEC,
+    QEMU_IFLA_IPTUN_LINK,
+    QEMU_IFLA_IPTUN_LOCAL,
+    QEMU_IFLA_IPTUN_REMOTE,
+    QEMU_IFLA_IPTUN_TTL,
+    QEMU_IFLA_IPTUN_TOS,
+    QEMU_IFLA_IPTUN_ENCAP_LIMIT,
+    QEMU_IFLA_IPTUN_FLOWINFO,
+    QEMU_IFLA_IPTUN_FLAGS,
+    QEMU_IFLA_IPTUN_PROTO,
+    QEMU_IFLA_IPTUN_PMTUDISC,
+    QEMU_IFLA_IPTUN_6RD_PREFIX,
+    QEMU_IFLA_IPTUN_6RD_RELAY_PREFIX,
+    QEMU_IFLA_IPTUN_6RD_PREFIXLEN,
+    QEMU_IFLA_IPTUN_6RD_RELAY_PREFIXLEN,
+    QEMU_IFLA_IPTUN_ENCAP_TYPE,
+    QEMU_IFLA_IPTUN_ENCAP_FLAGS,
+    QEMU_IFLA_IPTUN_ENCAP_SPORT,
+    QEMU_IFLA_IPTUN_ENCAP_DPORT,
+    QEMU_IFLA_IPTUN_COLLECT_METADATA,
+    QEMU_IFLA_IPTUN_FWMARK,
+    QEMU___IFLA_IPTUN_MAX,
 };
 
 enum {
@@ -621,6 +650,44 @@ static abi_long host_to_target_data_tun_nlattr(struct nlattr *nlattr,
     return 0;
 }
 
+static abi_long host_to_target_data_sit_nlattr(struct nlattr *nlattr,
+                                                  void *context)
+{
+    uint16_t *u16;
+    uint32_t *u32;
+
+    switch (nlattr->nla_type) {
+    /* uint8_t */
+    case QEMU_IFLA_IPTUN_TTL:
+    case QEMU_IFLA_IPTUN_TOS:
+    case QEMU_IFLA_IPTUN_PROTO:
+    case QEMU_IFLA_IPTUN_PMTUDISC:
+        break;
+    /* uint16_t */
+    case QEMU_IFLA_IPTUN_ENCAP_TYPE:
+    case QEMU_IFLA_IPTUN_FLAGS:
+    case QEMU_IFLA_IPTUN_ENCAP_FLAGS:
+    case QEMU_IFLA_IPTUN_ENCAP_SPORT:
+    case QEMU_IFLA_IPTUN_ENCAP_DPORT:
+        u16 = NLA_DATA(nlattr);
+        *u16 = tswap16(*u16);
+        break;
+    /* uint32_t */
+    case QEMU_IFLA_IPTUN_LINK:
+    case QEMU_IFLA_IPTUN_LOCAL:
+    case QEMU_IFLA_IPTUN_REMOTE:
+    case QEMU_IFLA_IPTUN_FWMARK:
+        u32 = NLA_DATA(nlattr);
+        *u32 = tswap32(*u32);
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP, "Unknown QEMU_IFLA_IPTUN type %d\n",
+                      nlattr->nla_type);
+        break;
+    }
+    return 0;
+}
+
 struct linkinfo_context {
     int len;
     char *name;
@@ -661,6 +728,12 @@ static abi_long host_to_target_data_linkinfo_nlattr(struct nlattr *nlattr,
                                                   nlattr->nla_len,
                                                   NULL,
                                                 host_to_target_data_tun_nlattr);
+        } else if (strncmp(li_context->name, "sit",
+                    li_context->len) == 0) {
+            return host_to_target_for_each_nlattr(NLA_DATA(nlattr),
+                                                  nlattr->nla_len,
+                                                  NULL,
+                                                host_to_target_data_sit_nlattr);
         } else {
             qemu_log_mask(LOG_UNIMP, "Unknown QEMU_IFLA_INFO_KIND %s\n",
                           li_context->name);
@@ -932,6 +1005,8 @@ static abi_long host_to_target_data_link_rtattr(struct rtattr *rtattr)
         return host_to_target_for_each_nlattr(RTA_DATA(rtattr), rtattr->rta_len,
                                               NULL,
                                              host_to_target_data_spec_nlattr);
+    case QEMU_IFLA_PAD:
+        break;
     case QEMU_IFLA_XDP:
         return host_to_target_for_each_nlattr(RTA_DATA(rtattr), rtattr->rta_len,
                                               NULL,
@@ -1296,6 +1371,65 @@ static abi_long target_to_host_nlmsg_audit(struct nlmsghdr *nlh, size_t len)
     return target_to_host_for_each_nlmsg(nlh, len, target_to_host_data_audit);
 }
 
+static abi_long host_to_target_data_crypto(struct nlmsghdr *nlh)
+{
+    struct crypto_user_alg *p;
+
+    switch (nlh->nlmsg_type) {
+    case CRYPTO_MSG_NEWALG:
+    case CRYPTO_MSG_DELALG:
+    case CRYPTO_MSG_UPDATEALG:
+    case CRYPTO_MSG_GETALG:
+    case CRYPTO_MSG_DELRNG:
+        if (nlh->nlmsg_len >= NLMSG_LENGTH(sizeof(*p))) {
+            p = NLMSG_DATA(nlh);
+            p->cru_type = tswap32(p->cru_type);
+            p->cru_mask = tswap32(p->cru_mask);
+            p->cru_refcnt = tswap32(p->cru_refcnt);
+            p->cru_flags = tswap32(p->cru_flags);
+        }
+        break;
+    default:
+        return -TARGET_ERANGE;
+    }
+    return 0;
+}
+
+static inline abi_long host_to_target_nlmsg_crypto(struct nlmsghdr *nlh,
+                                                  size_t len)
+{
+    return host_to_target_for_each_nlmsg(nlh, len, host_to_target_data_crypto);
+}
+
+static abi_long target_to_host_data_crypto(struct nlmsghdr *nlh)
+{
+    struct crypto_user_alg *p;
+
+    switch (nlh->nlmsg_type) {
+    case CRYPTO_MSG_NEWALG:
+    case CRYPTO_MSG_DELALG:
+    case CRYPTO_MSG_UPDATEALG:
+    case CRYPTO_MSG_GETALG:
+    case CRYPTO_MSG_DELRNG:
+        if (nlh->nlmsg_len >= NLMSG_LENGTH(sizeof(*p))) {
+            p = NLMSG_DATA(nlh);
+            p->cru_type = tswap32(p->cru_type);
+            p->cru_mask = tswap32(p->cru_mask);
+            p->cru_refcnt = tswap32(p->cru_refcnt);
+            p->cru_flags = tswap32(p->cru_flags);
+        }
+        break;
+    default:
+        return -TARGET_ERANGE;
+    }
+    return 0;
+}
+
+static abi_long target_to_host_nlmsg_crypto(struct nlmsghdr *nlh, size_t len)
+{
+    return target_to_host_for_each_nlmsg(nlh, len, target_to_host_data_crypto);
+}
+
 static abi_long packet_target_to_host_sockaddr(void *host_addr,
                                                abi_ulong target_addr,
                                                socklen_t len)
@@ -1380,6 +1514,34 @@ TargetFdTrans target_netlink_audit_trans = {
     .host_to_target_data = netlink_audit_host_to_target,
 };
 
+static abi_long netlink_crypto_target_to_host(void *buf, size_t len)
+{
+    abi_long ret;
+
+    ret = target_to_host_nlmsg_crypto(buf, len);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return len;
+}
+
+static abi_long netlink_crypto_host_to_target(void *buf, size_t len)
+{
+    abi_long ret;
+
+    ret = host_to_target_nlmsg_crypto(buf, len);
+    if (ret < 0) {
+        return ret;
+    }
+
+    return len;
+}
+
+TargetFdTrans target_netlink_crypto_trans = {
+    .target_to_host_data = netlink_crypto_target_to_host,
+    .host_to_target_data = netlink_crypto_host_to_target,
+};
 /* signalfd siginfo conversion */
 
 static void
@@ -1481,5 +1643,32 @@ static abi_long host_to_target_data_inotify(void *buf, size_t len)
 
 TargetFdTrans target_inotify_trans = {
     .host_to_target_data = host_to_target_data_inotify,
+};
+#endif
+
+#if (defined(TARGET_NR_fanotify_init) && defined(__NR_fanotify_init) && \
+     defined(CONFIG_FANOTIFY))
+static abi_long host_to_target_data_fanotify(void *buf, size_t len)
+{
+    struct fanotify_event_metadata *ev;
+    int i;
+    uint32_t name_len;
+
+    for (i = 0; i < len; i += sizeof(struct fanotify_event_metadata) + name_len) {
+        ev = (struct fanotify_event_metadata *)((char *)buf + i);
+        name_len = ev->event_len;
+
+        ev->metadata_len = tswap16(ev->metadata_len);
+        ev->mask = tswap64(ev->mask);
+        ev->fd = tswap32(ev->fd);
+        ev->pid = tswap32(ev->pid);
+        ev->event_len = tswap32(ev->event_len);
+    }
+
+    return len;
+}
+
+TargetFdTrans target_fanotify_trans = {
+    .host_to_target_data = host_to_target_data_fanotify,
 };
 #endif

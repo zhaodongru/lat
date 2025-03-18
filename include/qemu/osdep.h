@@ -27,6 +27,19 @@
 #ifndef QEMU_OSDEP_H
 #define QEMU_OSDEP_H
 
+/* arch dependent signal context retriev macros */
+#if defined(__mips__)
+#define UC_GR(uc) ((uc)->uc_mcontext.gregs)
+#define UC_PC(uc) ((uc)->uc_mcontext.pc)
+#elif defined(__loongarch__)
+#define UC_GR(uc) ((uc)->uc_mcontext.__gregs)
+#define UC_PC(uc) ((uc)->uc_mcontext.__pc)
+#define UC_FREG(uc) ((uc)->uc_mcontext.__fpregs)
+#define UC_FCSR(uc) ((uc)->uc_mcontext.__fcsr)
+#else
+#error "unknown arch"
+#endif
+
 #include "config-host.h"
 #ifdef NEED_CPU_H
 #include CONFIG_TARGET
@@ -176,9 +189,11 @@ extern "C" {
  * submit patches to remove any side-effects inside an assertion, or
  * fixing error handling that should use Error instead of assert.
  */
-#ifdef NDEBUG
-#error building with NDEBUG is not supported
-#endif
+/*
+ * #ifdef NDEBUG
+ * #error building with NDEBUG is not supported
+ * #endif
+ */
 #ifdef G_DISABLE_ASSERT
 #error building with G_DISABLE_ASSERT is not supported
 #endif
@@ -336,6 +351,16 @@ extern "C" {
 
 /* Check if pointer p is n-bytes aligned */
 #define QEMU_PTR_IS_ALIGNED(p, n) QEMU_IS_ALIGNED((uintptr_t)(p), (n))
+
+
+/*
+ * Round number down to multiple. Requires that d be a power of 2 (see
+ * QEMU_ALIGN_UP for a safer but slower version on arbitrary
+ * numbers); works even if d is a smaller type than n.
+ */
+#ifndef ROUND_DOWN
+#define ROUND_DOWN(n, d) ((n) & -(0 ? (n) : (d)))
+#endif
 
 /* Round number up to multiple. Requires that d be a power of 2 (see
  * QEMU_ALIGN_UP for a safer but slower version on arbitrary

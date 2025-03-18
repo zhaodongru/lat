@@ -2345,6 +2345,7 @@ static void tcg_target_detect_isa(void)
     sigaction(SIGILL, &sa_old, NULL);
 }
 
+#ifndef CONFIG_LATX
 static tcg_insn_unit *align_code_ptr(TCGContext *s)
 {
     uintptr_t p = (uintptr_t)s->code_ptr;
@@ -2354,6 +2355,7 @@ static tcg_insn_unit *align_code_ptr(TCGContext *s)
     }
     return s->code_ptr;
 }
+#endif
 
 /* Stack frame parameters.  */
 #define REG_SIZE   (TCG_TARGET_REG_BITS / 8)
@@ -2368,6 +2370,37 @@ static tcg_insn_unit *align_code_ptr(TCGContext *s)
 /* We're expecting to be able to use an immediate for frame allocation.  */
 QEMU_BUILD_BUG_ON(FRAME_SIZE > 0x7fff);
 
+#ifdef CONFIG_LATX
+#include "latx-config.h"
+#include "latx-options.h"
+
+/* Generate global QEMU prologue and epilogue code */
+static void tcg_target_qemu_prologue(TCGContext *s)
+{
+
+    int inst_nr = 0;
+
+// --------------------------------- prologue ------------------------------- //
+    inst_nr = target_latx_prologue(s->code_ptr);
+    if (option_dump)
+        fprintf(stderr, "[prologue] bt to native : %p, size = %d\n", s->code_ptr, inst_nr * 4);
+    s->code_ptr += inst_nr;
+
+
+// --------------------------------- epilogue ------------------------------- //
+    inst_nr = target_latx_epilogue(s->code_ptr);
+    if (option_dump)
+        fprintf(stderr, "[epilogue] native to bt %p, size = %d\n", s->code_ptr, inst_nr * 4);
+    tcg_code_gen_epilogue = s->code_ptr;
+    s->code_ptr += inst_nr;
+
+
+// --------------------------------- fpu rotate------------------------------ //
+    inst_nr = target_latx_fpu_rotate(s->code_ptr);
+    s->code_ptr += inst_nr;
+
+}
+#else
 /* Generate global QEMU prologue and epilogue code */
 static void tcg_target_qemu_prologue(TCGContext *s)
 {
@@ -2531,6 +2564,7 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     /* t3 = hgfedcba -- delay slot */
     tcg_out_opc_reg(s, OPC_OR, TCG_TMP3, TCG_TMP3, TCG_TMP1);
 }
+#endif
 
 static void tcg_target_init(TCGContext *s)
 {

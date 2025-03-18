@@ -231,6 +231,7 @@ extern const TargetPageBits target_page;
 #define TARGET_PAGE_SIZE   (1 << TARGET_PAGE_BITS)
 #define TARGET_PAGE_MASK   ((target_long)-1 << TARGET_PAGE_BITS)
 #endif
+#define TARGET_HUGEPAGE_SIZE 0x2000000
 
 #define TARGET_PAGE_ALIGN(addr) ROUND_UP((addr), TARGET_PAGE_SIZE)
 
@@ -270,6 +271,9 @@ extern intptr_t qemu_host_page_mask;
 /* Target-specific bits that will be used via page_get_flags().  */
 #define PAGE_TARGET_1  0x0200
 #define PAGE_TARGET_2  0x0400
+#define PAGE_OVERFLOW  0x0800
+#define PAGE_DONTNEED  0x1000
+#define PAGE_MEMSHARE  0x2000
 
 #if defined(CONFIG_USER_ONLY)
 void page_dump(FILE *f);
@@ -278,9 +282,29 @@ typedef int (*walk_memory_regions_fn)(void *, target_ulong,
                                       target_ulong, unsigned long);
 int walk_memory_regions(void *, walk_memory_regions_fn);
 
+bool test_flags(target_ulong address, int flags);
+target_ulong get_first_page(target_ulong start, target_ulong end);
 int page_get_flags(target_ulong address);
+void page_clear_overflow(target_ulong start, target_ulong end);
 void page_set_flags(target_ulong start, target_ulong end, int flags);
-int page_check_range(target_ulong start, target_ulong len, int flags);
+bool pageflags_set_clear(target_ulong start, target_ulong last,
+                                int set_flags, int clear_flags);
+int page_get_page_state(target_ulong address);
+void page_set_page_state_range(target_ulong start, target_ulong end, int state);
+void page_set_page_state(target_ulong addr, int state);
+void page_flush_page_state(target_ulong start, target_ulong end);
+
+/**
+ * page_check_range
+ * @start: first byte of range
+ * @len: length of range
+ * @flags: flags required for each page
+ *
+ * Return true if every page in [@start, @start+@len) has @flags set.
+ * Return false if any page is unmapped.  Thus testing flags == 0 is
+ * equivalent to testing for flags == PAGE_VALID.
+ */
+bool page_check_range(target_ulong start, target_ulong last, int flags);
 
 /**
  * page_alloc_target_data(address, size)
@@ -298,13 +322,52 @@ int page_check_range(target_ulong start, target_ulong len, int flags);
 void *page_alloc_target_data(target_ulong address, size_t size);
 
 /**
+ * page_find_range_empty
+ * @min: first byte of search range
+ * @max: last byte of search range
+ * @len: size of the hole required
+ * @align: alignment of the hole required (power of 2)
+ *
+ * If there is a range [x, x+@len) within [@min, @max] such that
+ * x % @align == 0, then return x.  Otherwise return -1.
+ * The memory lock must be held, as the caller will want to ensure
+ * the returned range stays empty until a new mapping can be installed.
+ */
+target_ulong page_find_range_empty(target_ulong min, target_ulong max,
+                                   target_ulong len, target_ulong align);
+
+/**
  * page_get_target_data(address)
  * @address: guest virtual address
  *
  * Return any out-of-bound memory assocated with the guest page
  * at @address, as per page_alloc_target_data.
  */
+#ifdef CONFIG_USER_ONLY
+typedef struct ShadowPageDesc {
+    void *p_addr;
+    int64_t access_off;
+} ShadowPageDesc;
+#endif
+
 void *page_get_target_data(target_ulong address);
+void page_reset_target_data(target_ulong start, target_ulong end);
+void set_shadow_page(target_ulong orig_page, void *shadow_p, int64_t access_off);
+int shared_private_interpret(siginfo_t *info, ucontext_t *uc);
+int lock_interpret(siginfo_t *info, ucontext_t *uc);
+#if defined(CONFIG_LATX_KZT)
+int elf_data_interpret(siginfo_t *info, ucontext_t *uc);
+#endif
+int hostpage_exist_shadow_page(uint64_t host_addr);
+int mprotect_one_shadow_page(abi_ulong addr, int prot);
+int shadow_page_mprotect(abi_ulong *old_start, abi_ulong *old_end, int host_prot);
+void shadow_page_munmap(abi_ulong start, abi_ulong end);
+void create_shadow_page_chunk(abi_ulong start, abi_ulong end,
+                              int inside_prot, int inside_flags,
+                              int fd, abi_ulong offset);
+void update_shadow_page_chunk(abi_ulong start, abi_ulong end, int prot,
+                              int flags, int fd, abi_ulong offset);
+#define min(a, b) ((a) < (b) ? a : b)
 #endif
 
 CPUArchState *cpu_copy(CPUArchState *env);
@@ -371,6 +434,9 @@ CPUArchState *cpu_copy(CPUArchState *env);
 #define TLB_INVALID_MASK    (1 << (TARGET_PAGE_BITS_MIN - 1))
 #define TLB_MMIO            0
 #define TLB_WATCHPOINT      0
+#if defined(CONFIG_LATX_PROFILER)
+void dump_exec_info(void);
+#endif
 
 #else
 
@@ -440,6 +506,7 @@ void dump_opcount_info(void);
 #ifdef CONFIG_TCG
 /* accel/tcg/cpu-exec.c */
 int cpu_exec(CPUState *cpu);
+void init_tb_callback_bridge(CPUState *cpu, void* info);
 void tcg_exec_realizefn(CPUState *cpu, Error **errp);
 void tcg_exec_unrealizefn(CPUState *cpu);
 #endif /* CONFIG_TCG */

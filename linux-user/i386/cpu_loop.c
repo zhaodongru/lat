@@ -21,6 +21,7 @@
 #include "qemu-common.h"
 #include "qemu.h"
 #include "cpu_loop-common.h"
+#include "latx-options.h"
 
 /***********************************************************/
 /* CPUX86 core interface */
@@ -207,7 +208,10 @@ void cpu_loop(CPUX86State *env)
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
         process_queued_cpu_work(cs);
-
+#if defined(CONFIG_LATX_KZT)
+        if(option_kzt && trapnr == 0xCC)
+            break;
+#endif
         switch(trapnr) {
         case 0x80:
             /* linux syscall from int $0x80 */
@@ -251,6 +255,12 @@ void cpu_loop(CPUX86State *env)
             break;
 #endif
         case EXCP0B_NOSEG:
+            /*
+             * For pulseaudio sigbus-test, addr need to be report
+             * to guest for signal handler usage.
+             */
+            gen_signal(env, TARGET_SIGBUS, TARGET_SI_KERNEL, env->cr[2]);
+            break;
         case EXCP0C_STACK:
             gen_signal(env, TARGET_SIGBUS, TARGET_SI_KERNEL, 0);
             break;
@@ -278,6 +288,29 @@ void cpu_loop(CPUX86State *env)
             }
 #endif
             gen_signal(env, TARGET_SIGFPE, TARGET_FPE_INTDIV, env->eip);
+            break;
+        case EXCP10_COPR:
+        {
+        /* EXCP10_COPR is raised by soft float */
+#define FPUS_IE (1 << 0)
+#define FPUS_ZE (1 << 2)
+#define FPUS_OE (1 << 3)
+#define FPUS_UE (1 << 4)
+#define FPUS_PE (1 << 5)
+            int si_code = TARGET_FPE_FLTUNK;
+            if (env->fpus & FPUS_IE) {
+                si_code = TARGET_FPE_FLTINV;
+            } else if (env->fpus & FPUS_ZE) {
+                si_code = TARGET_FPE_FLTDIV;
+            } else if (env->fpus & FPUS_OE) {
+                si_code = TARGET_FPE_FLTOVF;
+            } else if (env->fpus & FPUS_UE) {
+                si_code = TARGET_FPE_FLTUND;
+            } else if (env->fpus & FPUS_PE) {
+                si_code = TARGET_FPE_FLTRES;
+            }
+            gen_signal(env, TARGET_SIGFPE, si_code, env->eip);
+        }
             break;
         case EXCP01_DB:
         case EXCP03_INT3:
@@ -327,7 +360,7 @@ void cpu_loop(CPUX86State *env)
 
 void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
 {
-    env->cr[0] = CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK;
+    env->cr[0] = CR0_PG_MASK | CR0_WP_MASK | CR0_PE_MASK | CR0_NE_MASK;
     env->hflags |= HF_PE_MASK | HF_CPL_MASK;
     if (env->features[FEAT_1_EDX] & CPUID_SSE) {
         env->cr[4] |= CR4_OSFXSR_MASK;
@@ -378,7 +411,7 @@ void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
 #endif
     env->idt.base = target_mmap(0, sizeof(uint64_t) * (env->idt.limit + 1),
                                 PROT_READ|PROT_WRITE,
-                                MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+                                MAP_ANONYMOUS|MAP_PRIVATE, -1, 0, 0);
     idt_table = g2h_untagged(env->idt.base);
     set_idt(0, 0);
     set_idt(1, 0);
@@ -407,7 +440,7 @@ void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
         uint64_t *gdt_table;
         env->gdt.base = target_mmap(0, sizeof(uint64_t) * TARGET_GDT_ENTRIES,
                                     PROT_READ|PROT_WRITE,
-                                    MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+                                    MAP_ANONYMOUS|MAP_PRIVATE, -1, 0, 0);
         env->gdt.limit = sizeof(uint64_t) * TARGET_GDT_ENTRIES - 1;
         gdt_table = g2h_untagged(env->gdt.base);
 #ifdef TARGET_ABI32

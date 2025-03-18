@@ -28,6 +28,15 @@ static inline bool qemu_log_enabled(void)
     return qemu_logfile != NULL;
 }
 
+static inline bool latx_debug_enabled(void)
+{
+#if defined(CONFIG_LATX_DEBUG)
+    return true;
+#else
+    return false;
+#endif
+}
+
 /* Returns true if qemu_log() will write somewhere else than stderr
  */
 static inline bool qemu_log_separate(void)
@@ -64,7 +73,17 @@ static inline bool qemu_log_separate(void)
 #define CPU_LOG_PLUGIN     (1 << 18)
 /* LOG_STRACE is used for user-mode strace logging. */
 #define LOG_STRACE         (1 << 19)
+#define LAT_LOG_MEM        (1 << 20)
+/* LAT_LOG_DT s used for latx-disassemble-trace */
+#define LAT_LOG_DT         (1 << 21)
+#define LAT_LOG_SYSCALL    (1 << 22)
+#define LAT_IR2_SCHED      (1 << 23)
+#define LAT_LOG_EFLAGS     (1 << 24)
+#define LOG_STRACE_ERROR   (1 << 25)
+#define LAT_LOG_AOT        (1 << 26)
+#define LAT_IMM_REG        (1 << 27)
 
+#define LAT_LOG_PROFILE    (1 << 31)
 /* Lock output for a series of related logs.  Since this is not needed
  * for a single qemu_log / qemu_log_mask / qemu_log_mask_and_addr, we
  * assume that qemu_loglevel_mask has already been tested, and that
@@ -164,4 +183,7 @@ void qemu_log_flush(void);
 /* Close the log file */
 void qemu_log_close(void);
 
+void qemu_log_reset(void);
+void qemu_log_commit(bool syscall_error);
+int qemu_log_tmp(const char *fmt, ...);
 #endif

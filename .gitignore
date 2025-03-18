@@ -13,3 +13,8 @@ GTAGS
 *~
 *.ast_raw
 *.depend_raw
+build*
+*.swp
+compile_commands.json
+.ccls_cache/
+.cache/

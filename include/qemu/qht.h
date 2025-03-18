@@ -185,6 +185,7 @@ bool qht_resize(struct qht *ht, size_t n_elems);
  * See also: qht_iter_remove()
  */
 void qht_iter(struct qht *ht, qht_iter_func_t func, void *userp);
+void reset_all_locks(struct qht *ht);
 
 /**
  * qht_iter_remove - Iterate over a QHT, optionally removing entries

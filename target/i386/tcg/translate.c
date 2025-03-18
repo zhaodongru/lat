@@ -32,6 +32,11 @@
 
 #include "trace-tcg.h"
 #include "exec/log.h"
+#include "loongarch-extcontext.h"
+
+#ifdef CONFIG_LATX
+#include "reg-map.h"
+#endif
 
 #define PREFIX_REPZ   0x01
 #define PREFIX_REPNZ  0x02
@@ -1917,28 +1922,28 @@ static uint64_t advance_pc(CPUX86State *env, DisasContext *s, int num_bytes)
 
 static inline uint8_t x86_ldub_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldub(env, advance_pc(env, s, 1));
+    return translator_ldub(env, &s->base, advance_pc(env, s, 1));
 }
 
 static inline int16_t x86_ldsw_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldsw(env, advance_pc(env, s, 2));
+    return translator_ldsw(env, &s->base, advance_pc(env, s, 2));
 }
 
 static inline uint16_t x86_lduw_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_lduw(env, advance_pc(env, s, 2));
+    return translator_lduw(env, &s->base, advance_pc(env, s, 2));
 }
 
 static inline uint32_t x86_ldl_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldl(env, advance_pc(env, s, 4));
+    return translator_ldl(env, &s->base, advance_pc(env, s, 4));
 }
 
 #ifdef TARGET_X86_64
 static inline uint64_t x86_ldq_code(CPUX86State *env, DisasContext *s)
 {
-    return translator_ldq(env, advance_pc(env, s, 8));
+    return translator_ldq(env, &s->base, advance_pc(env, s, 8));
 }
 #endif
 
@@ -8634,19 +8639,138 @@ static const TranslatorOps i386_tr_ops = {
 };
 
 /* generate intermediate code for basic block 'tb'.  */
-void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns)
+void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns,
+                           target_ulong pc, void *host_pc)
 {
     DisasContext dc;
 
-    translator_loop(&i386_tr_ops, &dc.base, cpu, tb, max_insns);
+    translator_loop(cpu, tb, max_insns, pc, host_pc, &i386_tr_ops, &dc.base);
 }
 
+#ifndef CONFIG_LATX
 void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb,
                           target_ulong *data)
 {
     int cc_op = data[1];
+
     env->eip = data[0] - tb->cs_base;
     if (cc_op != CC_OP_DYNAMIC) {
         env->cc_op = cc_op;
     }
 }
+#else
+
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+static void restore_extcontext(CPUX86State *env, ucontext_t *uc)
+{
+    int i, nb_xmm_regs;
+#ifdef TARGET_X86_64
+    nb_xmm_regs = 16;
+#else
+    nb_xmm_regs = 8;
+#endif
+
+    /* save eflag */
+#ifdef __loongarch__
+    unsigned int *eflag_p = &uc->uc_mcontext.__reserved;
+    /*
+     * WARNING: the offset of __fregs in uc->uc_mcontext is incorrent,
+     * we fix the issue by adding a extra offset, the solution is only
+     * temporary!
+     */
+    eflag_p = eflag_p + 8;
+    env->eflags = *eflag_p;
+    env->eflags |= uc->uc_mcontext.__gregs[reg_statics_map[S_EFLAGS]];
+
+    /* save fcsr */
+    env->fcsr = UC_FCSR(uc);
+#endif
+
+    /* save fpr */
+    for (i = 0; i < 8; i++) {
+        env->fpregs[i].mmx.MMX_Q(0) = UC_FREG(uc)[reg_fpr_map[i] + 1].__val64[0];
+    }
+
+    /* save sse */
+    for (i = 0; i < nb_xmm_regs; i++) {
+        env->xmm_regs[i].ZMM_Q(0) = UC_FREG(uc)[reg_xmm_map[i] + 1].__val64[0];
+        env->xmm_regs[i].ZMM_Q(1) = UC_FREG(uc)[reg_xmm_map[i] + 1].__val64[1];
+        env->xmm_regs[i].ZMM_Q(2) = UC_FREG(uc)[reg_xmm_map[i] + 1].__val64[2];
+        env->xmm_regs[i].ZMM_Q(3) = UC_FREG(uc)[reg_xmm_map[i] + 1].__val64[3];
+    }
+}
+#else /* CONFIG_LOONGARCH_NEW_WORLD */
+static void restore_extcontext(CPUX86State *env, ucontext_t *uc)
+{
+    int i, nb_xmm_regs;
+#ifdef TARGET_X86_64
+    nb_xmm_regs = 16;
+#else
+    nb_xmm_regs = 8;
+#endif
+
+    struct extctx_layout extctx;
+    memset(&extctx, 0, sizeof(extctx));
+    parse_extcontext(uc, &extctx);
+
+    /* save fcsr */
+    env->fcsr = UC_GET_FCSR(&extctx, int);
+
+    /* save fpr */
+    for (i = 0; i < 8; i++) {
+        env->fpregs[i].mmx.MMX_Q(0) = UC_GET_FPR(&extctx, reg_fpr_map[i], int64_t);
+    }
+
+    /* save sse */
+    for (i = 0; i < nb_xmm_regs; i++) {
+        env->xmm_regs[i].ZMM_Q(0) = UC_GET_LSX(&extctx, reg_xmm_map[i], 0, int64_t);
+        env->xmm_regs[i].ZMM_Q(1) = UC_GET_LSX(&extctx, reg_xmm_map[i], 1, int64_t);
+        env->xmm_regs[i].ZMM_Q(2) = UC_GET_LSX(&extctx, reg_xmm_map[i], 2, int64_t);
+        env->xmm_regs[i].ZMM_Q(3) = UC_GET_LSX(&extctx, reg_xmm_map[i], 3, int64_t);
+    }
+    /* eflags */
+    env->eflags  = UC_LBT(&extctx)->eflags;
+    env->eflags |= UC_GR(uc)[reg_statics_map[S_EFLAGS]];
+
+}
+#endif
+
+void restore_state_to_opc(CPUX86State *env, TranslationBlock *tb,
+                          target_ulong *data)
+{
+    int cc_op = data[1];
+
+    env->eip = data[0] - tb->cs_base;
+    if (cc_op != CC_OP_DYNAMIC) {
+        env->cc_op = cc_op;
+    }
+
+    ucontext_t *uc = env->puc;
+    if (!uc)
+        return;
+
+    /*
+     * Update gpr to env 15, 18, 19, 26, 27, 28, 29, 30
+     * TODO: update fp if any
+     */
+    env->regs[R_EAX] = UC_GR(uc)[reg_gpr_map[eax_index]];
+    env->regs[R_EBX] = UC_GR(uc)[reg_gpr_map[ebx_index]];
+    env->regs[R_ECX] = UC_GR(uc)[reg_gpr_map[ecx_index]];
+    env->regs[R_EDX] = UC_GR(uc)[reg_gpr_map[edx_index]];
+    env->regs[R_ESP] = UC_GR(uc)[reg_gpr_map[esp_index]];
+    env->regs[R_EBP] = UC_GR(uc)[reg_gpr_map[ebp_index]];
+    env->regs[R_ESI] = UC_GR(uc)[reg_gpr_map[esi_index]];
+    env->regs[R_EDI] = UC_GR(uc)[reg_gpr_map[edi_index]];
+#ifdef TARGET_X86_64
+    env->regs[R_R8]  = UC_GR(uc)[reg_gpr_map[r8_index]];
+    env->regs[R_R9]  = UC_GR(uc)[reg_gpr_map[r9_index]];
+    env->regs[R_R10] = UC_GR(uc)[reg_gpr_map[r10_index]];
+    env->regs[R_R11] = UC_GR(uc)[reg_gpr_map[r11_index]];
+    env->regs[R_R12] = UC_GR(uc)[reg_gpr_map[r12_index]];
+    env->regs[R_R13] = UC_GR(uc)[reg_gpr_map[r13_index]];
+    env->regs[R_R14] = UC_GR(uc)[reg_gpr_map[r14_index]];
+    env->regs[R_R15] = UC_GR(uc)[reg_gpr_map[r15_index]];
+#endif
+    restore_extcontext(env, uc);
+}
+#endif

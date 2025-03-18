@@ -33,6 +33,19 @@
 #include "exec/tb-lookup.h"
 #include "exec/log.h"
 #include "qemu/main-loop.h"
+#if defined(CONFIG_LATX_KZT)
+#include "qemu.h"
+#include "elfloader_private.h"
+#include "box64context.h"
+#include "librarian.h"
+#include "debug.h"
+#include "tcg/tcg.h"
+#include "library.h"
+#include "fileutils.h"
+#include "bridge_private.h"
+extern const char *interp_prefix;
+extern struct elfheader_s * elf_header;
+#endif
 #if defined(TARGET_I386) && !defined(CONFIG_USER_ONLY)
 #include "hw/i386/apic.h"
 #endif
@@ -41,7 +54,13 @@
 #include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
 #include "internal.h"
-
+#include "qemu/cacheflush.h"
+#ifdef CONFIG_LATX_AOT
+#include "aot_recover_tb.h"
+#endif
+#ifdef CONFIG_LATX_PERF
+#include "latx-perf.h"
+#endif
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -59,7 +78,6 @@ typedef struct SyncClocks {
 #define THRESHOLD_REDUCE 1.5
 #define MAX_DELAY_PRINT_RATE 2000000000LL
 #define MAX_NB_PRINTS 100
-
 static int64_t max_delay;
 static int64_t max_advance;
 
@@ -144,6 +162,13 @@ static void init_delay_params(SyncClocks *sc, const CPUState *cpu)
 }
 #endif /* CONFIG USER ONLY */
 
+#ifdef CONFIG_LATX
+#include "latx-config.h"
+#include "latx-options.h"
+#include "latx-signal.h"
+#include "reg-map.h"
+#endif
+
 /* Execute a TB, and fix up the CPU state afterwards if necessary */
 /*
  * Disable CFI checks.
@@ -157,17 +182,59 @@ static void init_delay_params(SyncClocks *sc, const CPUState *cpu)
 static inline TranslationBlock * QEMU_DISABLE_CFI
 cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 {
+    if (!itb) {
+        fprintf(stderr, "[LATX] ERROR!\n");
+    }
     CPUArchState *env = cpu->env_ptr;
     uintptr_t ret;
     TranslationBlock *last_tb;
     const void *tb_ptr = itb->tc.ptr;
+#ifdef CONFIG_LATX_KZT
+    if (qemu_loglevel_mask(CPU_LOG_EXEC)) {
+        Dl_info dl_info;
+        if (option_kzt && itb->pc > reserved_va &&
+            dladdr ((const void *)((onebridge_t *)itb->pc)->f, &dl_info)) {
+            qemu_log_mask_and_addr(CPU_LOG_EXEC, itb->pc,
+                   "%d Trace %d: %p ["
+                   TARGET_FMT_lx "/" "%016llx" "/" TARGET_FMT_lx
+                   "/%#x] KZT:%s\n", getpid(), cpu->cpu_index, itb->tc.ptr,
+                   itb->cs_base, (unsigned long long)pthread_self(),
+                   itb->pc, itb->flags, dl_info.dli_sname);
+        } else {
+            qemu_log_mask_and_addr(CPU_LOG_EXEC, itb->pc,
+                   "%d Trace %d: %p ["
+                   TARGET_FMT_lx "/" "%016llx" "/" TARGET_FMT_lx
+                   "/%#x] %s\n", getpid(), cpu->cpu_index, itb->tc.ptr,
+                   itb->cs_base, (unsigned long long)pthread_self(),
+                   itb->pc, itb->flags, lookup_symbol(itb->pc));
+        }
+    }
+#endif
+#ifdef CONFIG_LATX_DEBUG
+    if (strlen(lookup_symbol(itb->pc)) > 0) {
+        if (env->last_func_index == -1) {
+            env->call_func[0] = (char *)lookup_symbol(itb->pc);
+            env->last_func_index = 0;
+            env->func_index = 1;
+        } else if (strcmp(env->call_func[env->last_func_index],
+                    lookup_symbol(itb->pc))) {
+            env->call_func[env->func_index] = (char *)lookup_symbol(itb->pc);
+            env->last_func_index = env->func_index;
+            env->func_index = (env->func_index + 1) % FUNC_DEPTH;
+        }
+    }
 
-    qemu_log_mask_and_addr(CPU_LOG_EXEC, itb->pc,
-                           "Trace %d: %p ["
-                           TARGET_FMT_lx "/" TARGET_FMT_lx "/%#x] %s\n",
-                           cpu->cpu_index, itb->tc.ptr,
-                           itb->cs_base, itb->pc, itb->flags,
-                           lookup_symbol(itb->pc));
+    env->tb_exec_count++;
+    if (unlikely(latx_unlink_count) && qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN) &&
+        latx_unlink_cpu == cpu->cpu_index) {
+        printf("Trace %d cpu%d [0x" TARGET_FMT_lx "] "
+               "eax 0x%016lx ecx 0x%016lx edx 0x%016lx ebx 0x%016lx "
+               "esp 0x%016lx ebp 0x%016lx esi 0x%016lx edi 0x%016lx\n",
+               getpid(), cpu->cpu_index, itb->pc,
+               env->regs[0], env->regs[1], env->regs[2], env->regs[3],
+               env->regs[4], env->regs[5], env->regs[6], env->regs[7]);
+    }
+#endif
 
 #if defined(DEBUG_DISAS)
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU)
@@ -186,7 +253,24 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 #endif /* DEBUG_DISAS */
 
     qemu_thread_jit_execute();
+#ifdef CONFIG_LATX_DEBUG
+    latx_before_exec_trace_tb(env, itb);
+#endif
+#ifdef CONFIG_LATX
+
+    env->fpu_clobber = false;
     ret = tcg_qemu_tb_exec(env, tb_ptr);
+
+    if (env->insn_save[0]) {
+        link_indirect_jmp(env);
+    }
+
+#else
+    ret = tcg_qemu_tb_exec(env, tb_ptr);
+#endif
+#ifdef CONFIG_LATX_DEBUG
+    latx_after_exec_trace_tb(env, itb);
+#endif
     cpu->can_do_io = 1;
     /*
      * TODO: Delay swapping back to the read-write region of the TB
@@ -196,10 +280,22 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
      * If we insist on touching both the RX and the RW pages, we
      * double the host TLB pressure.
      */
-    last_tb = tcg_splitwx_to_rw((void *)(ret & ~TB_EXIT_MASK));
+    if (option_split_tb) {
+        last_tb = (void *)(ret & ~TB_EXIT_MASK);
+    } else {
+        last_tb = tcg_splitwx_to_rw((void *)(ret & ~TB_EXIT_MASK));
+    }
     *tb_exit = ret & TB_EXIT_MASK;
 
     trace_exec_tb_exit(last_tb, *tb_exit);
+    if (last_tb) {
+        if (last_tb->signal_unlink[0]) {
+            last_tb->signal_unlink[0] = 2;
+        }
+        if (last_tb->signal_unlink[1]) {
+            last_tb->signal_unlink[1] = 2;
+        }
+    }
 
     if (*tb_exit > TB_EXIT_IDX1) {
         /* We didn't start executing this TB (eg because the instruction
@@ -219,6 +315,16 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
             cc->set_pc(cpu, last_tb->pc);
         }
     }
+
+#ifdef CONFIG_LATX_DEBUG
+    if (unlikely(latx_unlink_count) &&
+        latx_unlink_cpu == cpu->cpu_index &&
+        env->tb_exec_count >= latx_unlink_count) {
+        qemu_loglevel_set(CPU_LOG_TB_NOCHAIN);
+        tb_flush(cpu);
+    }
+#endif
+
     return last_tb;
 }
 
@@ -300,11 +406,40 @@ struct tb_desc {
     target_ulong pc;
     target_ulong cs_base;
     CPUArchState *env;
-    tb_page_addr_t phys_page1;
+    tb_page_addr_t page_addr0;
     uint32_t flags;
     uint32_t cflags;
     uint32_t trace_vcpu_dstate;
 };
+
+#ifdef CONFIG_LATX_AOT
+static bool smc_lookup_cmp(const void *p, const void *d)
+{
+    const TranslationBlock *tb = p;
+    const struct tb_desc *desc = d;
+
+    if (tb->pc == desc->pc) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+TranslationBlock *tb_smc_hash_table_lookup(target_ulong pc)
+{
+    struct tb_desc desc;
+    uint32_t h;
+    desc.pc = pc;
+    h = qemu_xxhash2(pc);
+    return qht_lookup_custom(&tb_ctx.smc_hash_table, &desc, h, smc_lookup_cmp);
+}
+
+void tb_smc_hash_table_insert(target_ulong pc, TranslationBlock *tb)
+{
+    uint32_t h = qemu_xxhash2(pc);
+    qht_insert(&tb_ctx.smc_hash_table, tb, h, NULL);
+}
+#endif
 
 static bool tb_lookup_cmp(const void *p, const void *d)
 {
@@ -312,21 +447,22 @@ static bool tb_lookup_cmp(const void *p, const void *d)
     const struct tb_desc *desc = d;
 
     if (tb->pc == desc->pc &&
-        tb->page_addr[0] == desc->phys_page1 &&
+        tb_page_addr0(tb) == desc->page_addr0 &&
         tb->cs_base == desc->cs_base &&
         tb->flags == desc->flags &&
         tb->trace_vcpu_dstate == desc->trace_vcpu_dstate &&
         tb_cflags(tb) == desc->cflags) {
         /* check next page if needed */
-        if (tb->page_addr[1] == -1) {
+        tb_page_addr_t tb_phys_page1 = tb_page_addr1(tb);
+        if (tb_phys_page1 == -1) {
             return true;
         } else {
-            tb_page_addr_t phys_page2;
-            target_ulong virt_page2;
+            tb_page_addr_t phys_page1;
+            target_ulong virt_page1;
 
-            virt_page2 = (desc->pc & TARGET_PAGE_MASK) + TARGET_PAGE_SIZE;
-            phys_page2 = get_page_addr_code(desc->env, virt_page2);
-            if (tb->page_addr[1] == phys_page2) {
+            virt_page1 = TARGET_PAGE_ALIGN(desc->pc);
+            phys_page1 = get_page_addr_code(desc->env, virt_page1);
+            if (tb_phys_page1 == phys_page1) {
                 return true;
             }
         }
@@ -352,13 +488,120 @@ TranslationBlock *tb_htable_lookup(CPUState *cpu, target_ulong pc,
     if (phys_pc == -1) {
         return NULL;
     }
-    desc.phys_page1 = phys_pc & TARGET_PAGE_MASK;
+    desc.page_addr0 = phys_pc;
     h = tb_hash_func(phys_pc, pc, flags, cflags, *cpu->trace_dstate);
     return qht_lookup_custom(&tb_ctx.htable, &desc, h, tb_lookup_cmp);
 }
 
+#ifdef CONFIG_LATX_INSTS_PATTERN
+static void update_inst(TranslationBlock *tb, int n, uint32_t insn)
+{
+    uintptr_t offset = tb->eflags_target_arg[n];
+    uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
+    uintptr_t jmp_rx = tc_ptr + offset;
+    uintptr_t jmp_rw = jmp_rx - tcg_splitwx_diff;
+    qatomic_set((uint32_t *)jmp_rw, insn);
+    flush_idcache_range(jmp_rx, jmp_rw, 4);
+}
+
+void tb_eflag_eliminate(TranslationBlock *tb, int n)
+{
+    if (n && (tb->bool_flags & OPT_BCC)) {
+        return;
+    }
+    /* NOP */
+    uint32_t insn = (0xd) << 22;
+    update_inst(tb, n, insn);
+}
+
+void tb_eflag_recover(TranslationBlock *tb, int n)
+{
+    if (n && (tb->bool_flags & OPT_BCC)) {
+        return;
+    }
+    uintptr_t offset = tb->eflags_target_arg[EFLAG_BACKUP];
+    uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
+    uintptr_t jmp_rx = tc_ptr + offset;
+    uint32_t insn = qatomic_read((uint32_t *)jmp_rx);
+    update_inst(tb, n, insn);
+}
+#endif
+
+#ifdef CONFIG_LATX_XCOMISX_OPT
+void tb_stub_bypass(TranslationBlock *tb, int n, uintptr_t addr)
+{
+    uintptr_t offset = tb->jmp_stub_target_arg[n];
+    uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
+    uintptr_t jmp_rx = tc_ptr + offset;
+    uintptr_t jmp_rw = jmp_rx - tcg_splitwx_diff;
+    tb_target_set_jmp_target(tc_ptr, jmp_rx, jmp_rw, addr);
+}
+#endif
+
 void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
 {
+#if defined(CONFIG_LATX) && defined(CONFIG_LATX_BNE_B)
+#define B_SHIFT     26
+#define OFF16_BITS  0xfc0003ff
+#define MAX_OFFS    0x00020000
+
+    bool is_ptn = false;
+#ifdef CONFIG_LATX_INSTS_PATTERN
+    if (tb->eflags_target_arg[0] != TB_JMP_RESET_OFFSET_INVALID) {
+        is_ptn = true;
+        if (n == 1 && !(tb->bool_flags & TARGET1_ELIMINATE)) {
+            tb->bool_flags &= ~OPT_BCC;
+        }
+    }
+#endif
+
+    /*
+     * The code is used to optimizate condition JMP
+     * Condition JMP is translated to BCC + B + B
+     *
+     *    before                 optimization
+     * BCC b1_offset   ---->    BCC tb1_offset
+     * B tb0_offset             B tb0_offset
+     * B tb1_offset             B tb1_offset
+     */
+    if (n == 1 && /* taken b */
+        ((tb->jmp_reset_offset[0] | tb->jmp_reset_offset[1]) !=
+        TB_JMP_RESET_OFFSET_INVALID) && /* direct jmp */
+        (tb->bool_flags & OPT_BCC)) {
+        uintptr_t bcc_addr;
+        uint32_t bcc_insn;
+
+        /* get bcc_insn */
+        int ptn_off = is_ptn ? 4 : 0;
+        bcc_addr = (uintptr_t)tb->tc.ptr + tb->first_jmp_align - ptn_off - 4;
+        bcc_insn = *(uint *)bcc_addr;
+
+        /* get taken b addr */
+        uintptr_t taken_b_addr = (uintptr_t)tb->tc.ptr + tb->jmp_target_arg[1];
+
+        uint32_t b_opcode = bcc_insn >> B_SHIFT;
+        /* BEQ BNE BLT BGE BLTU BGEU */
+        if (b_opcode >= 0x16 && b_opcode <= 0x1b) {
+            long offset;
+            if (addr - taken_b_addr == B_STUB_SIZE) {
+                /* if the function is used to unlink */
+                offset = tb->jmp_target_arg[1] - tb->first_jmp_align + 4;
+                bcc_insn &= OFF16_BITS;
+                bcc_insn |= (offset << 8) & ~OFF16_BITS;
+                *(uint *)(bcc_addr) = bcc_insn;
+            } else {
+                /* if the function is used to patch second B */
+                offset = addr - bcc_addr;
+                if ((offset < MAX_OFFS) && (offset >= -MAX_OFFS)) {
+                    bcc_insn &= OFF16_BITS;
+                    bcc_insn |= (offset << 8) & ~OFF16_BITS;
+                    *(uint *)(bcc_addr) = bcc_insn;
+                }
+            }
+            flush_idcache_range(bcc_addr, bcc_addr, 4);
+        }
+    }
+#endif
     if (TCG_TARGET_HAS_direct_jump) {
         uintptr_t offset = tb->jmp_target_arg[n];
         uintptr_t tc_ptr = (uintptr_t)tb->tc.ptr;
@@ -369,6 +612,16 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
         tb->jmp_target_arg[n] = addr;
     }
 }
+
+#ifdef CONFIG_LATX_TU
+void tu_relink(TranslationBlock *tb) {
+    /* fprintf(stderr, "relink\n"); */
+    uint32_t *tu_jmp_addr =
+        (uint32_t *)(tb->tc.ptr + tb->tu_jmp[TU_TB_INDEX_TARGET]);
+    *tu_jmp_addr = tb->tu_link_ins;
+    flush_idcache_range((uintptr_t)tu_jmp_addr, (uintptr_t)tu_jmp_addr, 4);
+}
+#endif
 
 static inline void tb_add_jump(TranslationBlock *tb, int n,
                                TranslationBlock *tb_next)
@@ -383,15 +636,33 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     if (tb_next->cflags & CF_INVALID) {
         goto out_unlock_next;
     }
+
+#ifdef CONFIG_LATX_TU
+    if (tb->tu_jmp[TU_TB_INDEX_TARGET] != TB_JMP_RESET_OFFSET_INVALID
+            && tb->tu_unlink_stub_offset != TU_UNLINK_STUB_INVALID) {
+        tu_relink(tb);
+        goto out_unlock_next;
+    }
+#endif
+
     /* Atomically claim the jump destination slot only if it was NULL */
     old = qatomic_cmpxchg(&tb->jmp_dest[n], (uintptr_t)NULL,
                           (uintptr_t)tb_next);
     if (old) {
         goto out_unlock_next;
+    } else if (tb->signal_unlink[n] == 2) {
+        tb->signal_unlink[n] = 0;
+        latx_tb_set_jmp_target(tb, n, tb_next);
+        goto out_unlock_next;
     }
 
+#ifdef CONFIG_LATX
+    /* check fpu rotate and patch the native jump address */
+    latx_tb_set_jmp_target(tb, n, tb_next);
+#else
     /* patch the native jump address */
     tb_set_jmp_target(tb, n, (uintptr_t)tb_next->tc.ptr);
+#endif
 
     /* add in TB jmp list */
     tb->jmp_list_next[n] = tb_next->jmp_list_head;
@@ -411,6 +682,13 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     return;
 }
 
+#ifdef CONFIG_LATX_TU
+#include "tu.h"
+#endif
+#ifdef CONFIG_LATX
+#include "opt-jmp.h"
+#endif
+
 static inline TranslationBlock *tb_find(CPUState *cpu,
                                         TranslationBlock *last_tb,
                                         int tb_exit, uint32_t cflags)
@@ -423,12 +701,57 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
     cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
 
     tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
-    if (tb == NULL) {
+#ifdef CONFIG_LATX_AOT2
+    if (tb == NULL && option_aot) {
         mmap_lock();
-        tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+        if (load_page_4(pc, cflags)) {
+            tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+        }
         mmap_unlock();
+    }
+#endif
+    if (tb == NULL) {
+#if (defined CONFIG_LATX_AOT) && (defined CONFIG_LATX_DEBUG)
+        if (option_debug_aot && option_load_aot) {
+            static long long cnt;
+            fprintf(stderr, "NOTE! Translating No.%lld basic block 0x"
+                    TARGET_FMT_lx "\n", ++cnt, pc);
+        }
+#endif
+        mmap_lock();
+
+#ifdef CONFIG_LATX_PERF
+    latx_timer_start(TIMER_TS);
+#endif
+
+#ifdef CONFIG_LATX_TU
+        tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+        jrra_pre_translate((void **)&tb, 1, cpu, cs_base, flags, cflags);
+        /* jrra_pre_translate((void **)tu_data->tb_list, tu_data->tb_num, */
+        /*                     cpu, cs_base, flags, cflags); */
+#else
+        tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+ #ifdef CONFIG_LATX
+        jrra_pre_translate((void **)&tb, 1, cpu, cs_base, flags, cflags);
+ #endif
+#endif
+#ifdef CONFIG_LATX_PERF
+    latx_timer_stop(TIMER_TS);
+#endif
+
+    if (!tb) {
+        mmap_unlock();
+        return NULL;
+    }
         /* We add the TB in the virtual pc hash table for the fast lookup */
-        qatomic_set(&cpu->tb_jmp_cache[tb_jmp_cache_hash_func(pc)], tb);
+        int hash_value = tb_jmp_cache_hash_func(pc);
+        qatomic_set(&cpu->tb_jmp_cache[hash_value], tb);
+#ifdef CONFIG_LATX
+        if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
+            latx_fast_jmp_cache_add(hash_value, tb);
+        }
+#endif
+        mmap_unlock();
     }
 #ifndef CONFIG_USER_ONLY
     /* We don't take care of direct jumps when address mapping changes in
@@ -484,8 +807,34 @@ static inline void cpu_handle_debug_exception(CPUState *cpu)
     }
 }
 
+#if defined(CONFIG_LATX_KZT)
+#include "callback.h"
+TranslationBlock * kzt_tb_find_exp(
+            CPUState *cpu,
+            TranslationBlock *last_tb,
+            int tb_exit, uint32_t cflags);
+TranslationBlock * kzt_tb_find_exp(
+            CPUState *cpu,
+            TranslationBlock *last_tb,
+            int tb_exit, uint32_t cflags)
+{
+    return tb_find(cpu, last_tb, tb_exit, cflags);
+}
+
+#endif
+
 static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
 {
+#if defined(CONFIG_LATX_KZT)
+    if (option_kzt) {
+        CPUArchState *env = cpu->env_ptr;
+        if(env->eip == (uint64_t)&RunFunctionWithState){
+            *ret = 0xCC;
+            return true;
+        }
+    }
+#endif
+
     if (cpu->exception_index < 0) {
 #ifndef CONFIG_USER_ONLY
         if (replay_has_exception()
@@ -498,7 +847,7 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
     }
     if (cpu->exception_index >= EXCP_INTERRUPT) {
         /* exit request from the cpu execution loop */
-        *ret = cpu->exception_index;
+        cpu->previous_exception_index = *ret = cpu->exception_index;
         if (*ret == EXCP_DEBUG) {
             cpu_handle_debug_exception(cpu);
         }
@@ -513,7 +862,7 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
         CPUClass *cc = CPU_GET_CLASS(cpu);
         cc->tcg_ops->do_interrupt(cpu);
 #endif
-        *ret = cpu->exception_index;
+       cpu->previous_exception_index = *ret = cpu->exception_index;
         cpu->exception_index = -1;
         return true;
 #else
@@ -562,6 +911,16 @@ static inline bool need_replay_interrupt(int interrupt_request)
 static inline bool cpu_handle_interrupt(CPUState *cpu,
                                         TranslationBlock **last_tb)
 {
+#if defined(CONFIG_LATX_KZT)
+    if (option_kzt) {
+        CPUArchState *env = cpu->env_ptr;
+        if(env->eip == (uint64_t)&RunFunctionWithState){
+            *last_tb = NULL;
+            return true;
+        }
+    }
+#endif
+
     CPUClass *cc = CPU_GET_CLASS(cpu);
 
     /* Clear the interrupt flag now since we're processing
@@ -710,7 +1069,6 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
 }
 
 /* main execution loop */
-
 int cpu_exec(CPUState *cpu)
 {
     CPUClass *cc = CPU_GET_CLASS(cpu);
@@ -794,6 +1152,13 @@ int cpu_exec(CPUState *cpu)
             }
 
             tb = tb_find(cpu, last_tb, tb_exit, cflags);
+#ifdef CONFIG_LATX_DEBUG
+            trace_tb_execution(tb);
+#endif
+#ifdef CONFIG_LATX_PROFILER
+            ADD_TB_PROFILE(tb, exit_times, 1);
+#endif
+
             cpu_loop_exec_tb(cpu, tb, &last_tb, &tb_exit);
             /* Try to align the host and virtual clocks
                if the guest is in advance */

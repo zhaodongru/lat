@@ -22,8 +22,6 @@ stub_ss.add(files('isa-bus.c'))
 stub_ss.add(files('is-daemonized.c'))
 stub_ss.add(when: 'CONFIG_LINUX_AIO', if_true: files('linux-aio.c'))
 stub_ss.add(files('migr-blocker.c'))
-stub_ss.add(files('monitor.c'))
-stub_ss.add(files('monitor-core.c'))
 stub_ss.add(files('pci-bus.c'))
 stub_ss.add(files('pci-host-piix.c'))
 stub_ss.add(files('qemu-timer-notify-cb.c'))
@@ -45,12 +43,4 @@ stub_ss.add(files('vmstate.c'))
 stub_ss.add(files('vm-stop.c'))
 stub_ss.add(files('win32-kbd-hook.c'))
 stub_ss.add(files('cpu-synchronize-state.c'))
-if have_block
-  stub_ss.add(files('replay-tools.c'))
-endif
-if have_system
-  stub_ss.add(files('semihost.c'))
-  stub_ss.add(files('xen-hw-stub.c'))
-else
-  stub_ss.add(files('qdev.c'))
-endif
+stub_ss.add(files('qdev.c'))

@@ -60,7 +60,7 @@ GList *range_list_insert(GList *list, Range *data)
 
     /* Merge any subsequent list elements that now also overlap */
     while (l->next && range_compare(l->data, l->next->data) == 0) {
-        GList *new_l;
+        GList *new_l __attribute__((unused));
 
         range_extend(l->data, l->next->data);
         g_free(l->next->data);

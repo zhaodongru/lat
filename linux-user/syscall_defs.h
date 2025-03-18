@@ -9,7 +9,6 @@
 
 #include "syscall_nr.h"
 
-
 /* socket operations for socketcall() */
 #define TARGET_SYS_SOCKET       1         /* socket()              */
 #define TARGET_SYS_BIND         2         /* bind()                */
@@ -121,15 +120,15 @@
 #define TARGET_IOC_DIRMASK	((1 << TARGET_IOC_DIRBITS)-1)
 
 #define TARGET_IOC_NRSHIFT	0
-#define TARGET_IOC_TYPESHIFT	(TARGET_IOC_NRSHIFT+TARGET_IOC_NRBITS)
-#define TARGET_IOC_SIZESHIFT	(TARGET_IOC_TYPESHIFT+TARGET_IOC_TYPEBITS)
-#define TARGET_IOC_DIRSHIFT	(TARGET_IOC_SIZESHIFT+TARGET_IOC_SIZEBITS)
+#define TARGET_IOC_TYPESHIFT    (TARGET_IOC_NRSHIFT + TARGET_IOC_NRBITS)
+#define TARGET_IOC_SIZESHIFT    (TARGET_IOC_TYPESHIFT + TARGET_IOC_TYPEBITS)
+#define TARGET_IOC_DIRSHIFT     (TARGET_IOC_SIZESHIFT + TARGET_IOC_SIZEBITS)
 
 #define TARGET_IOC(dir,type,nr,size) \
-	(((dir)  << TARGET_IOC_DIRSHIFT) | \
-	 ((type) << TARGET_IOC_TYPESHIFT) | \
-	 ((nr)   << TARGET_IOC_NRSHIFT) | \
-	 ((size) << TARGET_IOC_SIZESHIFT))
+    (((dir)  << TARGET_IOC_DIRSHIFT) | \
+    ((type) << TARGET_IOC_TYPESHIFT) | \
+    ((nr)   << TARGET_IOC_NRSHIFT) | \
+    ((size) << TARGET_IOC_SIZESHIFT))
 
 /* used to create numbers */
 #define TARGET_IO(type,nr)		TARGET_IOC(TARGET_IOC_NONE,(type),(nr),0)
@@ -455,6 +454,7 @@ struct target_dirent64 {
 #else
 #define TARGET_NSIG	   64
 #endif
+#define LA_HOOK_PTRACE     SIGBUS
 #define TARGET_NSIG_BPW	   TARGET_ABI_BITS
 #define TARGET_NSIG_WORDS  (TARGET_NSIG / TARGET_NSIG_BPW)
 
@@ -493,6 +493,7 @@ void target_to_host_old_sigset(sigset_t *sigset,
 struct target_sigaction;
 int do_sigaction(int sig, const struct target_sigaction *act,
                  struct target_sigaction *oact);
+void target_sigpending(target_sigset_t *d);
 
 #include "target_signal.h"
 
@@ -906,6 +907,7 @@ struct target_rtc_pll_info {
 
 #define TARGET_SIOCGIFTXQLEN   0x8942          /* Get the tx queue length      */
 #define TARGET_SIOCSIFTXQLEN   0x8943          /* Set the tx queue length      */
+#define TARGET_SIOCETHTOOL     0x8946          /* Ethtool interface            */
 
 /* ARP cache control calls. */
 #define TARGET_OLD_SIOCDARP    0x8950          /* old delete ARP table entry   */
@@ -931,7 +933,8 @@ struct target_rtc_pll_info {
 /* From <linux/wireless.h> */
 
 #define TARGET_SIOCGIWNAME     0x8B01          /* get name == wireless protocol */
-
+#define TARGET_SIOCGIWMODE     0x8B07          /* get operation mode            */
+#define TARGET_SIOCGIWESSID    0x8B1B          /* get ESSID                     */
 /* From <linux/if_tun.h> */
 
 #define TARGET_TUNSETDEBUG        TARGET_IOW('T', 201, int)
@@ -1025,6 +1028,7 @@ struct target_rtc_pll_info {
 
 #define TARGET_FICLONE    TARGET_IOW(0x94, 9, int)
 #define TARGET_FICLONERANGE TARGET_IOW(0x94, 13, struct file_clone_range)
+#define TARGET_FIDEDUPERANGE TARGET_IOWR(0x94, 54, struct file_dedupe_range)
 
 /*
  * Note that the ioctl numbers for FS_IOC_<GET|SET><FLAGS|VERSION>
@@ -1261,6 +1265,17 @@ struct target_rtc_pll_info {
 #define TARGET_VT_RELDISP             0x5605
 #define TARGET_VT_DISALLOCATE         0x5608
 
+/* NSIO */
+#define TARGET_NS_GET_USERNS          TARGET_IO(0xb7, 0x01)
+#define TARGET_NS_GET_PARENT          TARGET_IO(0xb7, 0x02)
+#define TARGET_NS_GET_NSTYPE          TARGET_IO(0xb7, 0x03)
+#define TARGET_NS_GET_OWNER_UID       TARGET_IO(0xb7, 0x04)
+
+/* PERF */
+#define TARGET_PERF_EVENT_IOC_RESET     TARGET_IO(0x24, 0x03)
+#define TARGET_PERF_EVENT_IOC_ENABLE    TARGET_IO(0x24, 0x00)
+#define TARGET_PERF_EVENT_IOC_DISABLE   TARGET_IO(0x24, 0x01)
+
 /* device mapper */
 #define TARGET_DM_VERSION             TARGET_IOWRU(0xfd, 0x00)
 #define TARGET_DM_REMOVE_ALL          TARGET_IOWRU(0xfd, 0x01)
@@ -1279,11 +1294,216 @@ struct target_rtc_pll_info {
 #define TARGET_DM_TARGET_MSG          TARGET_IOWRU(0xfd, 0x0e)
 #define TARGET_DM_DEV_SET_GEOMETRY    TARGET_IOWRU(0xfd, 0x0f)
 
+
+struct target_drm_client {
+	int idx;		/**< Which client desired? */
+	int auth;		/**< Is client authenticated? */
+	abi_ulong pid;	/**< Process ID */
+	abi_ulong uid;	/**< User ID */
+	abi_ulong magic;	/**< Magic */
+	abi_ulong iocs;	/**< Ioctl count */
+};
 /* drm ioctls */
 #define TARGET_DRM_IOCTL_VERSION      TARGET_IOWRU('d', 0x00)
 
 /* drm i915 ioctls */
 #define TARGET_DRM_IOCTL_I915_GETPARAM              TARGET_IOWRU('d', 0x46)
+
+#define TARGET_DRM_IOCTL_GET_UNIQUE             TARGET_IOWR('d', 0x01, struct drm_unique)
+#define TARGET_DRM_IOCTL_GET_MAGIC              TARGET_IOR ('d', 0x02, struct drm_auth)
+#define TARGET_DRM_IOCTL_IRQ_BUSID              TARGET_IOWR('d', 0x03, struct drm_irq_busid)
+#define TARGET_DRM_IOCTL_GET_MAP                TARGET_IOWR('d', 0x04, struct drm_map)
+#define TARGET_DRM_IOCTL_GET_CLIENT             TARGET_IOWR('d', 0x05, struct target_drm_client)
+#define TARGET_DRM_IOCTL_GET_STATS              TARGET_IOR ('d', 0x06, struct drm_stats)
+#define TARGET_DRM_IOCTL_SET_VERSION            TARGET_IOWR('d', 0x07, struct drm_set_version)
+#define TARGET_DRM_IOCTL_MODESET_CTL            TARGET_IOW ('d', 0x08, struct drm_modeset_ctl)
+#define TARGET_DRM_IOCTL_GEM_CLOSE              TARGET_IOW ('d', 0x09, struct drm_gem_close)
+#define TARGET_DRM_IOCTL_GEM_FLINK              TARGET_IOWR('d', 0x0a, struct drm_gem_flink)
+#define TARGET_DRM_IOCTL_GEM_OPEN               TARGET_IOWR('d', 0x0b, struct drm_gem_open)
+#define TARGET_DRM_IOCTL_GET_CAP                TARGET_IOWR('d', 0x0c, struct drm_get_cap)
+#define TARGET_DRM_IOCTL_SET_CLIENT_CAP         TARGET_IOW('d', 0x0d, \
+                                                struct drm_set_client_cap)
+#define TARGET_DRM_IOCTL_SET_UNIQUE             TARGET_IOW ('d', 0x10, struct drm_unique)
+#define TARGET_DRM_IOCTL_AUTH_MAGIC             TARGET_IOW ('d', 0x11, struct drm_auth)
+#define TARGET_DRM_IOCTL_BLOCK                  TARGET_IOWR('d', 0x12, struct drm_block)
+#define TARGET_DRM_IOCTL_UNBLOCK                TARGET_IOWR('d', 0x13, struct drm_block)
+#define TARGET_DRM_IOCTL_CONTROL                TARGET_IOW ('d', 0x14, struct drm_control)
+#define TARGET_DRM_IOCTL_ADD_MAP                TARGET_IOWR('d', 0x15, struct drm_map)
+#define TARGET_DRM_IOCTL_ADD_BUFS               TARGET_IOWR('d', 0x16, struct drm_buf_desc)
+#define TARGET_DRM_IOCTL_MARK_BUFS              TARGET_IOW ('d', 0x17, struct drm_buf_desc)
+#define TARGET_DRM_IOCTL_INFO_BUFS              TARGET_IOWR('d', 0x18, struct drm_buf_info)
+#define TARGET_DRM_IOCTL_MAP_BUFS               TARGET_IOWR('d', 0x19, struct drm_buf_map)
+#define TARGET_DRM_IOCTL_FREE_BUFS              TARGET_IOW ('d', 0x1a, struct drm_buf_free)
+#define TARGET_DRM_IOCTL_RM_MAP                 TARGET_IOW ('d', 0x1b, struct drm_map)
+#define TARGET_DRM_IOCTL_SET_SAREA_CTX          TARGET_IOW ('d', 0x1c, struct drm_ctx_priv_map)
+#define TARGET_DRM_IOCTL_GET_SAREA_CTX          TARGET_IOWR('d', 0x1d, struct drm_ctx_priv_map)
+#define TARGET_DRM_IOCTL_SET_MASTER             TARGET_IO  ('d', 0x1e)
+#define TARGET_DRM_IOCTL_DROP_MASTER            TARGET_IO  ('d', 0x1f)
+#define TARGET_DRM_IOCTL_ADD_CTX                TARGET_IOWR('d', 0x20, struct drm_ctx)
+#define TARGET_DRM_IOCTL_RM_CTX                 TARGET_IOWR('d', 0x21, struct drm_ctx)
+#define TARGET_DRM_IOCTL_MOD_CTX                TARGET_IOW ('d', 0x22, struct drm_ctx)
+#define TARGET_DRM_IOCTL_GET_CTX                TARGET_IOWR('d', 0x23, struct drm_ctx)
+#define TARGET_DRM_IOCTL_SWITCH_CTX             TARGET_IOW ('d', 0x24, struct drm_ctx)
+#define TARGET_DRM_IOCTL_NEW_CTX                TARGET_IOW ('d', 0x25, struct drm_ctx)
+#define TARGET_DRM_IOCTL_RES_CTX                TARGET_IOWR('d', 0x26, struct drm_ctx_res)
+#define TARGET_DRM_IOCTL_ADD_DRAW               TARGET_IOWR('d', 0x27, struct drm_draw)
+#define TARGET_DRM_IOCTL_RM_DRAW                TARGET_IOWR('d', 0x28, struct drm_draw)
+#define TARGET_DRM_IOCTL_DMA                    TARGET_IOWR('d', 0x29, struct drm_dma)
+#define TARGET_DRM_IOCTL_LOCK                   TARGET_IOW ('d', 0x2a, struct drm_lock)
+#define TARGET_DRM_IOCTL_UNLOCK                 TARGET_IOW ('d', 0x2b, struct drm_lock)
+#define TARGET_DRM_IOCTL_FINISH                 TARGET_IOW ('d', 0x2c, struct drm_lock)
+#define TARGET_DRM_IOCTL_PRIME_HANDLE_TO_FD     TARGET_IOWR('d', 0x2d, struct drm_prime_handle)
+#define TARGET_DRM_IOCTL_PRIME_FD_TO_HANDLE     TARGET_IOWR('d', 0x2e, struct drm_prime_handle)
+#define TARGET_DRM_IOCTL_AGP_ACQUIRE            TARGET_IO  ('d', 0x30)
+#define TARGET_DRM_IOCTL_AGP_RELEASE            TARGET_IO  ('d', 0x31)
+#define TARGET_DRM_IOCTL_AGP_ENABLE             TARGET_IOW ('d', 0x32, struct drm_agp_mode)
+#define TARGET_DRM_IOCTL_AGP_INFO               TARGET_IOR ('d', 0x33, struct drm_agp_info)
+#define TARGET_DRM_IOCTL_AGP_ALLOC              TARGET_IOWR('d', 0x34, struct drm_agp_buffer)
+#define TARGET_DRM_IOCTL_AGP_FREE               TARGET_IOW ('d', 0x35, struct drm_agp_buffer)
+#define TARGET_DRM_IOCTL_AGP_BIND               TARGET_IOW ('d', 0x36, struct drm_agp_binding)
+#define TARGET_DRM_IOCTL_AGP_UNBIND             TARGET_IOW ('d', 0x37, struct drm_agp_binding)
+#define TARGET_DRM_IOCTL_SG_ALLOC               TARGET_IOWR('d', 0x38, struct drm_scatter_gather)
+#define TARGET_DRM_IOCTL_SG_FREE                TARGET_IOW ('d', 0x39, struct drm_scatter_gather)
+#define TARGET_DRM_IOCTL_WAIT_VBLANK            TARGET_IOWR('d', 0x3a, union drm_wait_vblank)
+#define TARGET_DRM_IOCTL_UPDATE_DRAW            TARGET_IOW ('d', 0x3f, struct drm_update_draw)
+#define TARGET_DRM_IOCTL_MODE_GETRESOURCES      TARGET_IOWR('d', 0xa0, struct drm_mode_card_res)
+#define TARGET_DRM_IOCTL_MODE_GETCRTC           TARGET_IOWR('d', 0xa1, struct drm_mode_crtc)
+#define TARGET_DRM_IOCTL_MODE_SETCRTC           TARGET_IOWR('d', 0xa2, struct drm_mode_crtc)
+#define TARGET_DRM_IOCTL_MODE_CURSOR            TARGET_IOWR('d', 0xa3, struct drm_mode_cursor)
+#define TARGET_DRM_IOCTL_MODE_GETGAMMA          TARGET_IOWR('d', 0xa4, struct drm_mode_crtc_lut)
+#define TARGET_DRM_IOCTL_MODE_SETGAMMA          TARGET_IOWR('d', 0xa5, struct drm_mode_crtc_lut)
+#define TARGET_DRM_IOCTL_MODE_GETENCODER        TARGET_IOWR('d', 0xa6, struct drm_mode_get_encoder)
+#define TARGET_DRM_IOCTL_MODE_GETCONNECTOR      TARGET_IOWR('d', 0xa7, struct drm_mode_get_connector)
+#define TARGET_DRM_IOCTL_MODE_ATTACHMODE        TARGET_IOWR('d', 0xa8, struct drm_mode_mode_cmd)
+#define TARGET_DRM_IOCTL_MODE_DETACHMODE        TARGET_IOWR('d', 0xa9, struct drm_mode_mode_cmd)
+#define TARGET_DRM_IOCTL_MODE_GETPROPERTY       TARGET_IOWR('d', 0xaa, struct drm_mode_get_property)
+#define TARGET_DRM_IOCTL_MODE_SETPROPERTY       TARGET_IOWR('d', 0xab, struct drm_mode_connector_set_property)
+#define TARGET_DRM_IOCTL_MODE_GETPROPBLOB       TARGET_IOWR('d', 0xac, struct drm_mode_get_blob)
+#define TARGET_DRM_IOCTL_MODE_GETFB             TARGET_IOWR('d', 0xad, struct drm_mode_fb_cmd)
+#define TARGET_DRM_IOCTL_MODE_ADDFB             TARGET_IOWR('d', 0xae, struct drm_mode_fb_cmd)
+#define TARGET_DRM_IOCTL_MODE_RMFB              TARGET_IOWR('d', 0xaf, unsigned int)
+#define TARGET_DRM_IOCTL_MODE_PAGE_FLIP         TARGET_IOWR('d', 0xb0, struct drm_mode_crtc_page_flip)
+#define TARGET_DRM_IOCTL_MODE_DIRTYFB           TARGET_IOWR('d', 0xb1, struct drm_mode_fb_dirty_cmd)
+#define TARGET_DRM_IOCTL_MODE_CREATE_DUMB       TARGET_IOWR('d', 0xb2, struct drm_mode_create_dumb)
+#define TARGET_DRM_IOCTL_MODE_MAP_DUMB          TARGET_IOWR('d', 0xb3, struct drm_mode_map_dumb)
+#define TARGET_DRM_IOCTL_MODE_DESTROY_DUMB      TARGET_IOWR('d', 0xb4, struct drm_mode_destroy_dumb)
+#define TARGET_DRM_IOCTL_MODE_GETPLANERESOURCES TARGET_IOWR('d', 0xb5, struct drm_mode_get_plane_res)
+#define TARGET_DRM_IOCTL_MODE_GETPLANE          TARGET_IOWR('d', 0xb6, struct drm_mode_get_plane)
+#define TARGET_DRM_IOCTL_MODE_SETPLANE          TARGET_IOWR('d', 0xb7, struct drm_mode_set_plane)
+#define TARGET_DRM_IOCTL_MODE_ADDFB2            TARGET_IOWR('d', 0xb8, struct drm_mode_fb_cmd2)
+#define TARGET_DRM_IOCTL_MODE_OBJ_GETPROPERTIES TARGET_IOWR('d', 0xb9, struct drm_mode_obj_get_properties)
+#define TARGET_DRM_IOCTL_MODE_OBJ_SETPROPERTY   TARGET_IOWR('d', 0xba, struct drm_mode_obj_set_property)
+#define TARGET_DRM_IOCTL_MODE_CURSOR2           TARGET_IOWR('d', 0xbb, struct drm_mode_cursor2)
+#define TARGET_DRM_IOCTL_MODE_ATOMIC		TARGET_IOWR('d', 0xBC, struct drm_mode_atomic)
+#define TARGET_DRM_IOCTL_MODE_CREATEPROPBLOB	TARGET_IOWR('d', 0xBD, struct drm_mode_create_blob)
+#define TARGET_DRM_IOCTL_MODE_DESTROYPROPBLOB	TARGET_IOWR('d', 0xBE, struct drm_mode_destroy_blob)
+#define TARGET_DRM_IOCTL_MODE_CREATE_LEASE	TARGET_IOWR('d', 0xC6, struct drm_mode_create_lease)
+#define TARGET_DRM_IOCTL_MODE_LIST_LESSEES	TARGET_IOWR('d', 0xC7, struct drm_mode_list_lessees)
+#define TARGET_DRM_IOCTL_MODE_GET_LEASE	TARGET_IOWR('d', 0xC8, struct drm_mode_get_lease)
+#define TARGET_DRM_IOCTL_MODE_REVOKE_LEASE	TARGET_IOWR('d', 0xC9, struct drm_mode_revoke_lease)
+
+#define TARGET_DRM_IOCTL_CRTC_GET_SEQUENCE	TARGET_IOWR('d', 0x3b, struct drm_crtc_get_sequence)
+#define TARGET_DRM_IOCTL_CRTC_QUEUE_SEQUENCE	TARGET_IOWR('d', 0x3c, struct drm_crtc_queue_sequence)
+
+struct target_drm_syncobj_wait_old {
+	uint64_t handles;
+	/* absolute timeout */
+	int64_t timeout_nsec;
+	uint32_t count_handles;
+	uint32_t flags;
+	uint32_t first_signaled; /* only valid when not waiting all */
+	uint32_t pad;
+};
+struct target_drm_syncobj_timeline_wait_old {
+	uint64_t handles;
+	/* wait on specific timeline point for every handles*/
+	uint64_t points;
+	/* absolute timeout */
+	int64_t timeout_nsec;
+	uint32_t count_handles;
+	uint32_t flags;
+	uint32_t first_signaled; /* only valid when not waiting all */
+	uint32_t pad;
+};
+
+#define TARGET_DRM_IOCTL_SYNCOBJ_CREATE	TARGET_IOWR('d', 0xBF, struct drm_syncobj_create)
+#define TARGET_DRM_IOCTL_SYNCOBJ_DESTROY	TARGET_IOWR('d', 0xC0, struct drm_syncobj_destroy)
+#define TARGET_DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD	TARGET_IOWR('d', 0xC1, struct drm_syncobj_handle)
+#define TARGET_DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE	TARGET_IOWR('d', 0xC2, struct drm_syncobj_handle)
+#define TARGET_DRM_IOCTL_SYNCOBJ_WAIT		TARGET_IOWR('d', 0xC3, struct drm_syncobj_wait)
+#define TARGET_DRM_IOCTL_SYNCOBJ_WAIT_OLD		TARGET_IOWR('d', 0xC3, struct target_drm_syncobj_wait_old)
+#define DRM_IOCTL_SYNCOBJ_WAIT_OLD		TARGET_IOWR('d', 0xC3, struct target_drm_syncobj_wait_old)
+
+#define TARGET_DRM_IOCTL_SYNCOBJ_RESET		TARGET_IOWR('d', 0xC4, struct drm_syncobj_array)
+#define TARGET_DRM_IOCTL_SYNCOBJ_SIGNAL	TARGET_IOWR('d', 0xC5, struct drm_syncobj_array)
+
+#ifdef DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT
+#define TARGET_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT	TARGET_IOWR('d', 0xCA, struct drm_syncobj_timeline_wait)
+#define TARGET_DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_OLD	TARGET_IOWR('d', 0xCA, struct target_drm_syncobj_timeline_wait_old)
+#define DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_OLD	TARGET_IOWR('d', 0xCA, struct target_drm_syncobj_timeline_wait_old)
+#endif
+#ifdef DRM_IOCTL_SYNCOBJ_QUERY
+#define TARGET_DRM_IOCTL_SYNCOBJ_QUERY		TARGET_IOWR('d', 0xCB, struct drm_syncobj_timeline_array)
+#endif
+#ifdef DRM_IOCTL_SYNCOBJ_TRANSFER
+#define TARGET_DRM_IOCTL_SYNCOBJ_TRANSFER	TARGET_IOWR('d', 0xCC, struct drm_syncobj_transfer)
+#endif
+#ifdef DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL
+#define TARGET_DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL	TARGET_IOWR('d', 0xCD, struct drm_syncobj_timeline_array)
+#endif
+
+#define TARGET_DRM_IOCTL_RADEON_CP_INIT    TARGET_IOW ('d', 0x40, struct drm_radeon_init)
+#define TARGET_DRM_IOCTL_RADEON_CP_START   TARGET_IO  ('d', 0x41)
+#define TARGET_DRM_IOCTL_RADEON_CP_STOP    TARGET_IOW ('d', 0x42, struct drm_radeon_cp_stop)
+#define TARGET_DRM_IOCTL_RADEON_CP_RESET   TARGET_IO  ('d', 0x43)
+#define TARGET_DRM_IOCTL_RADEON_CP_IDLE    TARGET_IO  ('d', 0x44)
+#define TARGET_DRM_IOCTL_RADEON_RESET      TARGET_IO  ('d', 0x45)
+#define TARGET_DRM_IOCTL_RADEON_FULLSCREEN TARGET_IOW ('d', 0x46, struct drm_radeon_fullscreen)
+#define TARGET_DRM_IOCTL_RADEON_SWAP       TARGET_IO  ('d', 0x47)
+#define TARGET_DRM_IOCTL_RADEON_CLEAR      TARGET_IOW ('d', 0x48, struct drm_radeon_clear)
+#define TARGET_DRM_IOCTL_RADEON_VERTEX     TARGET_IOW ('d', 0x49, struct drm_radeon_vertex)
+#define TARGET_DRM_IOCTL_RADEON_INDICES    TARGET_IOW ('d', 0x4A, struct drm_radeon_indices)
+#define TARGET_DRM_IOCTL_RADEON_STIPPLE    TARGET_IOW ('d', 0x4C, struct drm_radeon_stipple)
+#define TARGET_DRM_IOCTL_RADEON_INDIRECT   TARGET_IOWR('d', 0x4D, struct drm_radeon_indirect)
+//#define TARGET_DRM_IOCTL_RADEON_TEXTURE    TARGET_IOWR('d', 0x4E, struct drm_radeon_texture)
+//#define TARGET_DRM_IOCTL_RADEON_VERTEX2    TARGET_IOW ('d', 0x4F, struct drm_radeon_vertex2)
+//#define TARGET_DRM_IOCTL_RADEON_CMDBUF     TARGET_IOW ('d', 0x50, struct drm_radeon_cmd_buffer)
+#define TARGET_DRM_IOCTL_RADEON_GETPARAM   TARGET_IOWR('d', 0x51, struct drm_radeon_getparam)
+#define TARGET_DRM_IOCTL_RADEON_FLIP       TARGET_IO  ('d', 0x52)
+#define TARGET_DRM_IOCTL_RADEON_ALLOC      TARGET_IOWR('d', 0x53, struct drm_radeon_mem_alloc)
+#define TARGET_DRM_IOCTL_RADEON_FREE       TARGET_IOW ('d', 0x54, struct drm_radeon_mem_free)
+#define TARGET_DRM_IOCTL_RADEON_INIT_HEAP  TARGET_IOW ('d', 0x55, struct drm_radeon_mem_init_heap)
+#define TARGET_DRM_IOCTL_RADEON_IRQ_EMIT   TARGET_IOWR('d', 0x56, struct drm_radeon_irq_emit)
+#define TARGET_DRM_IOCTL_RADEON_IRQ_WAIT   TARGET_IOW ('d', 0x57, struct drm_radeon_irq_wait)
+#define TARGET_DRM_IOCTL_RADEON_CP_RESUME  TARGET_IO  ('d', 0x58)
+#define TARGET_DRM_IOCTL_RADEON_SETPARAM   TARGET_IOW ('d', 0x59, struct drm_radeon_setparam)
+#define TARGET_DRM_IOCTL_RADEON_SURF_ALLOC TARGET_IOW ('d', 0x5A, struct drm_radeon_surface_alloc)
+#define TARGET_DRM_IOCTL_RADEON_SURF_FREE  TARGET_IOW ('d', 0x5B, unsigned int)
+/* KMS */
+#define TARGET_DRM_IOCTL_RADEON_GEM_INFO       TARGET_IOWR('d', 0x5C, struct drm_radeon_gem_info)
+#define TARGET_DRM_IOCTL_RADEON_GEM_CREATE     TARGET_IOWRU('d', 0x5D)
+#define TARGET_DRM_IOCTL_RADEON_GEM_MMAP       TARGET_IOWR('d', 0x5E, struct drm_radeon_gem_mmap)
+#define TARGET_DRM_IOCTL_RADEON_GEM_PREAD      TARGET_IOWR('d', 0x61, struct drm_radeon_gem_pread)
+#define TARGET_DRM_IOCTL_RADEON_GEM_PWRITE     TARGET_IOWR('d', 0x62, struct drm_radeon_gem_pwrite)
+#define TARGET_DRM_IOCTL_RADEON_GEM_SET_DOMAIN TARGET_IOWR('d', 0x63, struct drm_radeon_gem_set_domain)
+#define TARGET_DRM_IOCTL_RADEON_GEM_WAIT_IDLE  TARGET_IOW( 'd', 0x64, struct drm_radeon_gem_wait_idle)
+#define TARGET_DRM_IOCTL_RADEON_CS             TARGET_IOWR('d', 0x66, struct drm_radeon_cs)
+#define TARGET_DRM_IOCTL_RADEON_INFO           TARGET_IOWR('d', 0x67, struct drm_radeon_info)
+#define TARGET_DRM_IOCTL_RADEON_GEM_SET_TILING TARGET_IOWR('d', 0x68, struct drm_radeon_gem_set_tiling)
+#define TARGET_DRM_IOCTL_RADEON_GEM_GET_TILING TARGET_IOWR('d', 0x69, struct drm_radeon_gem_get_tiling)
+#define TARGET_DRM_IOCTL_RADEON_GEM_BUSY       TARGET_IOWR('d', 0x6A, struct drm_radeon_gem_busy)
+#define TARGET_DRM_IOCTL_RADEON_GEM_VA         TARGET_IOWR('d', 0x6B, struct drm_radeon_gem_va)
+#define TARGET_DRM_IOCTL_RADEON_GEM_OP         TARGET_IOWR('d', 0x6C, struct drm_radeon_gem_op)
+#define TARGET_DRM_IOCTL_RADEON_GEM_USERPTR    TARGET_IOWR('d', 0x6D ,struct drm_radeon_gem_userptr)
+
+
+/* linux/dma-buf.h */
+#define TARGET_DMA_BUF_IOCTL_SYNC  TARGET_IOW('b', 0, abi_ullong)
+#define TARGET_DMA_BUF_SET_NAME    TARGET_IOW('b', 1, abi_ulong)
+#define TARGET_DMA_BUF_SET_NAME_A  TARGET_IOW('b', 1, abi_uint)
+#define TARGET_DMA_BUF_SET_NAME_B  TARGET_IOW('b', 1, abi_ullong)
+#define TARGET_DMA_BUF_IOCTL_EXPORT_SYNC_FILE  TARGET_IOWR('b', 2, abi_ullong)
+#define TARGET_DMA_BUF_IOCTL_IMPORT_SYNC_FILE  TARGET_IOW('b', 3, abi_ullong)
 
 /* from asm/termbits.h */
 
@@ -1306,6 +1526,26 @@ struct target_winsize {
 
 #include "termbits.h"
 
+#define HUGETLB_FLAG_ENCODE_SHIFT   26
+#define MAP_HUGE_2MB     (21 << HUGETLB_FLAG_ENCODE_SHIFT)
+#define MAP_HUGE_1GB     (30 << HUGETLB_FLAG_ENCODE_SHIFT)
+#define LEGACY_MAP_MASK (TARGET_MAP_SHARED \
+        | TARGET_MAP_PRIVATE \
+        | TARGET_MAP_FIXED \
+        | TARGET_MAP_ANONYMOUS \
+        | TARGET_MAP_DENYWRITE \
+        | TARGET_MAP_EXECUTABLE \
+        | TARGET_MAP_UNINITIALIZED \
+        | TARGET_MAP_GROWSDOWN \
+        | TARGET_MAP_LOCKED \
+        | TARGET_MAP_NORESERVE \
+        | TARGET_MAP_POPULATE \
+        | TARGET_MAP_NONBLOCK \
+        | TARGET_MAP_STACK \
+        | TARGET_MAP_HUGETLB \
+        | TARGET_MAP_HUGE_2MB \
+        | TARGET_MAP_HUGE_1GB)
+
 #if defined(TARGET_MIPS)
 #define TARGET_PROT_SEM         0x10
 #else
@@ -1324,6 +1564,7 @@ struct target_winsize {
 #define TARGET_MAP_TYPE         0x03		/* Mask for type of mapping */
 #else
 #define TARGET_MAP_TYPE         0x0f		/* Mask for type of mapping */
+#define TARGET_MAP_SHARED_VALIDATE 0x03
 #endif
 
 /* Target specific */
@@ -1400,6 +1641,8 @@ struct target_winsize {
 #define TARGET_MAP_STACK        0x20000         /* ignored */
 #define TARGET_MAP_HUGETLB      0x40000         /* create a huge page mapping */
 #define TARGET_MAP_UNINITIALIZED 0x4000000	/* for anonymous mmap, memory could be uninitialized */
+#define TARGET_MAP_HUGE_2MB MAP_HUGE_2MB
+#define TARGET_MAP_HUGE_1GB MAP_HUGE_1GB
 #endif
 
 #if (defined(TARGET_I386) && defined(TARGET_ABI32)) \
@@ -2438,6 +2681,7 @@ struct target_statfs64 {
 #define TARGET_F_LINUX_SPECIFIC_BASE 1024
 #define TARGET_F_SETLEASE            (TARGET_F_LINUX_SPECIFIC_BASE + 0)
 #define TARGET_F_GETLEASE            (TARGET_F_LINUX_SPECIFIC_BASE + 1)
+#define TARGET_F_CANCELLK            (TARGET_F_LINUX_SPECIFIC_BASE + 5)
 #define TARGET_F_DUPFD_CLOEXEC       (TARGET_F_LINUX_SPECIFIC_BASE + 6)
 #define TARGET_F_NOTIFY              (TARGET_F_LINUX_SPECIFIC_BASE + 2)
 #define TARGET_F_SETPIPE_SZ          (TARGET_F_LINUX_SPECIFIC_BASE + 7)
@@ -2759,6 +3003,14 @@ struct target_drm_version {
     abi_ulong desc;
 };
 
+struct target_drm_radeon_gem_create {
+	uint64_t	size;
+	uint64_t	alignment;
+	uint32_t	handle;
+	uint32_t	initial_domain;
+	uint32_t	flags;
+};
+
 struct target_drm_i915_getparam {
     int param;
     abi_ulong value;
@@ -2925,4 +3177,660 @@ struct target_statx {
    /* 0x100 */
 };
 
+struct target_v4l2_ext_controls {
+    union {
+        abi_int ctrl_class;
+        abi_int which;
+     };
+    abi_int count;
+    abi_int error_idx;
+    abi_int reserved[2];
+    abi_int controls; /*ptr*/
+};
+
+struct target_v4l2_pix_format {
+    abi_uint            width;
+    abi_uint            height;
+    abi_uint            pixelformat;
+    abi_uint            field;        /* enum v4l2_field */
+    abi_uint            bytesperline;    /* for padding, zero if unused */
+    abi_uint            sizeimage;
+    abi_uint            colorspace;    /* enum v4l2_colorspace */
+    abi_uint            priv;        /* private data, depends on pixelformat */
+    abi_uint            flags;        /* format flags (V4L2_PIX_FMT_FLAG_*) */
+    union {
+        /* enum v4l2_ycbcr_encoding */
+        abi_uint            ycbcr_enc;
+        /* enum v4l2_hsv_encoding */
+        abi_uint            hsv_enc;
+    };
+    abi_uint            quantization;    /* enum v4l2_quantization */
+    abi_uint            xfer_func;    /* enum v4l2_xfer_func */
+};
+
+struct target_v4l2_plane_pix_format {
+    abi_uint            sizeimage;
+    abi_uint            bytesperline;
+    abi_ushort        reserved[6];
+} __attribute__ ((packed));
+
+#define VIDEO_MAX_PLANES               8
+struct target_v4l2_pix_format_mplane {
+    abi_uint                width;
+    abi_uint                height;
+    abi_uint                pixelformat;
+    abi_uint                field;
+    abi_uint                colorspace;
+
+    struct target_v4l2_plane_pix_format    plane_fmt[VIDEO_MAX_PLANES];
+    uint8_t                num_planes;
+    uint8_t                flags;
+    union {
+        uint8_t                ycbcr_enc;
+        uint8_t                hsv_enc;
+    };
+    uint8_t                quantization;
+    uint8_t                xfer_func;
+    uint8_t                reserved[7];
+} __attribute__ ((packed));
+
+struct target_v4l2_rect {
+    abi_int   left;
+    abi_int   top;
+    abi_uint   width;
+    abi_uint   height;
+};
+
+struct target_v4l2_window {
+    struct target_v4l2_rect        w;
+    abi_uint            field;     /* enum v4l2_field */
+    abi_uint            chromakey;
+    abi_ulong            clips;
+    abi_uint            clipcount;
+    abi_ulong            bitmap;
+    uint8_t                    global_alpha;
+};
+
+struct target_v4l2_vbi_format {
+    abi_uint    sampling_rate;        /* in 1 Hz */
+    abi_uint    offset;
+    abi_uint    samples_per_line;
+    abi_uint    sample_format;        /* V4L2_PIX_FMT_* */
+    abi_int        start[2];
+    abi_uint    count[2];
+    abi_uint    flags;            /* V4L2_VBI_* */
+    abi_uint    reserved[2];        /* must be zero */
+};
+
+struct target_v4l2_sliced_vbi_format {
+    abi_ushort   service_set;
+    abi_ushort   service_lines[2][24];
+    abi_uint   io_size;
+    abi_uint   reserved[2];            /* must be zero */
+};
+
+struct target_v4l2_sdr_format {
+    abi_uint                pixelformat;
+    abi_uint                buffersize;
+    uint8_t                reserved[24];
+} __attribute__ ((packed));
+
+struct target_v4l2_meta_format {
+    abi_uint                dataformat;
+    abi_uint                buffersize;
+} __attribute__ ((packed));
+
+struct target_v4l2_format {
+    abi_int     type;
+    union {
+        struct target_v4l2_pix_format           pix;
+        struct target_v4l2_pix_format_mplane    pix_mp;
+        struct target_v4l2_window               win;
+        struct target_v4l2_vbi_format           vbi;
+        struct target_v4l2_sliced_vbi_format    sliced;
+        struct target_v4l2_sdr_format           sdr;
+        struct target_v4l2_meta_format          meta;
+        uint8_t                                 raw_data[200];
+    } fmt;
+};
+
+struct target_v4l2_framebuffer {
+    abi_int            capability;
+    abi_int            flags;
+    /* FIXME: in theory we should pass something like PCI device + memory
+     * region + offset instead of some physical address */
+    abi_ulong                    base;
+    struct {
+        abi_int        width;
+        abi_int        height;
+        abi_int        pixelformat;
+        abi_int        field;        /* enum v4l2_field */
+        abi_int        bytesperline; /* for padding, zero if unused */
+        abi_int        sizeimage;
+        abi_int        colorspace;   /* enum v4l2_colorspace */
+        abi_int        priv;         /* reserved field, set to 0 */
+    } fmt;
+};
+
+struct target_v4l2_input {
+    abi_int         index;        /*  Which input */
+    uint8_t         name[32];     /*  Label */
+    abi_int         type;         /*  Type of input */
+    abi_int         audioset;     /*  Associated audios (bitfield) */
+    abi_int        tuner;         /*  enum v4l2_tuner_type */
+    abi_ullong  std;
+    abi_int         status;
+    abi_int         capabilities;
+    abi_int         reserved[3];
+};
+
+struct target_v4l2_fract {
+    abi_int   numerator;
+    abi_int   denominator;
+};
+
+struct target_v4l2_standard {
+    abi_int             index;
+    abi_ullong              id;
+    uint8_t             name[24];
+    struct target_v4l2_fract    frameperiod; /* Frames, not fields */
+    abi_int             framelines;
+    abi_int             reserved[4];
+};
+
+struct target_v4l2_timecode {
+    abi_int    type;
+    abi_int    flags;
+    uint8_t    frames;
+    uint8_t    seconds;
+    uint8_t    minutes;
+    uint8_t    hours;
+    uint8_t    userbits[4];
+};
+
+struct target_v4l2_buffer {
+    abi_int            index;
+    abi_int            type;
+    abi_int            bytesused;
+    abi_int            flags;
+    abi_int            field;
+    struct target_timeval        timestamp;
+    struct target_v4l2_timecode    timecode;
+    abi_int            sequence;
+
+    /* memory location */
+    abi_int            memory;
+    union {
+        abi_int           offset;
+        abi_long   userptr;
+        abi_ulong  planes;
+        abi_int        fd;
+    } m;
+    abi_int            length;
+    abi_int            reserved2;
+    abi_int            reserved;
+};
+
+struct target_v4l2_exportbuffer {
+    abi_int        type; /* enum v4l2_buf_type */
+    abi_int        index;
+    abi_int        plane;
+    abi_int        flags;
+    abi_int        fd;
+    abi_int        reserved[11];
+};
+
+struct target_v4l2_edid {
+    abi_int pad;
+    abi_int start_block;
+    abi_int blocks;
+    abi_int reserved[5];
+    abi_int  edid; /*ptr*/
+};
+
+struct target_v4l2_create_buffers {
+    abi_int            index;
+    abi_int            count;
+    abi_int            memory;
+    struct target_v4l2_format    format;
+    abi_int            reserved[8];
+};
+
+struct target_v4l2_event {
+    abi_int                type;
+    union {
+        uint8_t            data[64];
+    } u;
+    abi_int                pending;
+    abi_int                sequence;
+    struct target_timespec timestamp;
+    abi_int                id;
+    abi_int                reserved[8];
+};
+
+struct target_snd_seq_addr {
+    unsigned char client;
+    unsigned char port;
+};
+
+struct target_snd_seq_port_info {
+    struct target_snd_seq_addr addr;
+    char name[64];
+
+    abi_int capability;
+    abi_int type;
+    abi_int midi_channels;
+    abi_int midi_voices;
+    abi_int synth_voices;
+
+    abi_int read_use;
+    abi_int write_use;
+
+    abi_ulong kernel;
+    abi_int flags;
+    unsigned char time_queue;
+    char reserved[59];
+};
+
+struct target_snd_pcm_mmap_status {
+    abi_int state;
+    abi_int pad1;
+    abi_ulong hw_ptr;
+    struct target_timespec tstamp;
+    abi_int suspended_state;
+    struct target_timespec audio_tstamp;
+};
+
+struct target_snd_pcm_mmap_control {
+    abi_ulong appl_ptr;
+    abi_ulong avail_min;
+};
+
+struct target_snd_pcm_sync_ptr {
+    abi_int flags;
+    union {
+        struct target_snd_pcm_mmap_status status;
+        unsigned char reserved[64];
+    } s;
+    union {
+        struct target_snd_pcm_mmap_control control;
+        unsigned char reserved[64];
+    } c;
+};
+
+#define MPT2_IOCTL_VERSION_LENGTH (32)
+#define MPT3_PRODUCT_SPECIFIC_DWORDS 23
+#define MPI2_EVENT_NOTIFY_EVENTMASK_WORDS 4
+#define MPT3_EVENT_DATA_SIZE (192)
+struct target_MPT3_IOCTL_EVENTS {
+    abi_uint event;
+    abi_uint context;
+    unsigned char data[MPT3_EVENT_DATA_SIZE];
+};
+struct target_mpt3_ioctl_header {
+    abi_uint ioc_number;
+    abi_uint port_number;
+    abi_uint max_data_size;
+};
+struct target_mpt3_ioctl_pci_info {
+    union {
+        struct {
+            abi_uint device:5;
+            abi_uint function:3;
+            abi_uint bus:24;
+        } bits;
+        abi_uint  word;
+    } u;
+    abi_uint segment_id;
+};
+struct target_mpt3_ioctl_iocinfo {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint adapter_type;
+    abi_uint port_number;
+    abi_uint pci_id;
+    abi_uint hw_rev;
+    abi_uint subsystem_device;
+    abi_uint subsystem_vendor;
+    abi_uint rsvd0;
+    abi_uint firmware_version;
+    abi_uint bios_version;
+    uint8_t driver_version[MPT2_IOCTL_VERSION_LENGTH];
+    uint8_t rsvd1;
+    uint8_t scsi_id;
+    abi_short rsvd2;
+    struct target_mpt3_ioctl_pci_info pci_information;
+};
+struct target_mpt3_ioctl_command {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint timeout;
+    abi_ulong reply_frame_buf_ptr;
+    abi_ulong data_in_buf_ptr;
+    abi_ulong data_out_buf_ptr;
+    abi_ulong sense_data_ptr;
+    abi_uint max_reply_bytes;
+    abi_uint data_in_size;
+    abi_uint data_out_size;
+    abi_uint max_sense_bytes;
+    abi_uint data_sge_offset;
+    uint8_t mf[1];
+};
+struct target_mpt3_ioctl_eventquery {
+    struct target_mpt3_ioctl_header hdr;
+    abi_ushort event_entries;
+    abi_ushort rsvd;
+    abi_uint event_types[MPI2_EVENT_NOTIFY_EVENTMASK_WORDS];
+};
+struct target_mpt3_ioctl_eventenable {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint event_types[4];
+};
+struct target_mpt3_ioctl_eventreport {
+    struct target_mpt3_ioctl_header hdr;
+    struct target_MPT3_IOCTL_EVENTS event_data[1];
+};
+struct target_mpt3_ioctl_diag_reset {
+    struct target_mpt3_ioctl_header hdr;
+};
+struct target_mpt3_ioctl_btdh_mapping {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint id;
+    abi_uint bus;
+    abi_ushort handle;
+    abi_ushort rsvd;
+};
+struct target_mpt3_diag_register {
+    struct target_mpt3_ioctl_header hdr;
+    uint8_t reserved;
+    uint8_t buffer_type;
+    abi_ushort application_flags;
+    abi_uint diagnostic_flags;
+    abi_uint product_specific[MPT3_PRODUCT_SPECIFIC_DWORDS];
+    abi_uint requested_buffer_size;
+    abi_uint unique_id;
+};
+struct target_mpt3_diag_release {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint unique_id;
+};
+struct target_mpt3_diag_unregister {
+    struct target_mpt3_ioctl_header hdr;
+    abi_uint unique_id;
+};
+struct target_mpt3_diag_query {
+    struct target_mpt3_ioctl_header hdr;
+    uint8_t reserved;
+    uint8_t buffer_type;
+    abi_ushort application_flags;
+    abi_uint diagnostic_flags;
+    abi_uint product_specific[MPT3_PRODUCT_SPECIFIC_DWORDS];
+    abi_uint total_buffer_size;
+    abi_uint driver_added_buffer_size;
+    abi_uint unique_id;
+};
+struct target_mpt3_diag_read_buffer {
+    struct target_mpt3_ioctl_header hdr;
+    uint8_t status;
+    uint8_t reserved;
+    abi_ushort flags;
+    abi_uint starting_offset;
+    abi_uint bytes_to_read;
+    abi_uint unique_id;
+    abi_uint diagnostic_data[1];
+};
+
+#include "ioctl/ioctl_def/def_amdgpu_drm.h"
+
+#define SNDRV_MASK_MAX    256
+struct target_snd_mask {
+    abi_int bits[(SNDRV_MASK_MAX + 31) / 32];
+};
+
+struct target_snd_interval {
+    abi_int min, max;
+    abi_int data;
+};
+#define    SNDRV_PCM_HW_PARAM_ACCESS          0
+#define    SNDRV_PCM_HW_PARAM_FORMAT          1
+#define    SNDRV_PCM_HW_PARAM_SUBFORMAT       2
+#define    SNDRV_PCM_HW_PARAM_FIRST_MASK      SNDRV_PCM_HW_PARAM_ACCESS
+#define    SNDRV_PCM_HW_PARAM_LAST_MASK       SNDRV_PCM_HW_PARAM_SUBFORMAT
+
+#define    SNDRV_PCM_HW_PARAM_SAMPLE_BITS     8
+#define    SNDRV_PCM_HW_PARAM_FRAME_BITS      9
+#define    SNDRV_PCM_HW_PARAM_CHANNELS        10
+#define    SNDRV_PCM_HW_PARAM_RATE             11
+#define    SNDRV_PCM_HW_PARAM_PERIOD_TIME     12
+#define    SNDRV_PCM_HW_PARAM_PERIOD_SIZE     13
+#define    SNDRV_PCM_HW_PARAM_PERIOD_BYTES    14
+#define    SNDRV_PCM_HW_PARAM_PERIODS          15
+#define    SNDRV_PCM_HW_PARAM_BUFFER_TIME      16
+#define    SNDRV_PCM_HW_PARAM_BUFFER_SIZE      17
+#define    SNDRV_PCM_HW_PARAM_BUFFER_BYTES     18
+#define    SNDRV_PCM_HW_PARAM_TICK_TIME         19
+#define    SNDRV_PCM_HW_PARAM_FIRST_INTERVAL    SNDRV_PCM_HW_PARAM_SAMPLE_BITS
+#define    SNDRV_PCM_HW_PARAM_LAST_INTERVAL     SNDRV_PCM_HW_PARAM_TICK_TIME
+
+struct target_snd_pcm_hw_params {
+    abi_int flags;
+    struct target_snd_mask masks[SNDRV_PCM_HW_PARAM_LAST_MASK -
+                        SNDRV_PCM_HW_PARAM_FIRST_MASK + 1];
+    struct target_snd_mask mres[5];
+    struct target_snd_interval intervals[SNDRV_PCM_HW_PARAM_LAST_INTERVAL -
+                        SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + 1];
+    struct target_snd_interval ires[9];
+    abi_int rmask;
+    abi_int cmask;
+    abi_int info;
+    abi_int msbits;
+    abi_int rate_num;
+    abi_int rate_den;
+    abi_ulong fifo_size;
+    unsigned char reserved[64];
+};
+
+struct target_snd_pcm_sw_params {
+    abi_int tstamp_mode;
+    abi_uint period_step;
+    abi_uint sleep_min;
+    abi_ulong avail_min;
+    abi_ulong xfer_align;
+    abi_ulong start_threshold;
+    abi_ulong stop_threshold;
+    abi_ulong silence_threshold;
+    abi_ulong silence_size;
+    abi_ulong boundary;
+    abi_uint proto;
+    abi_uint tstamp_type;
+    unsigned char reserved[56];
+};
+
+struct target_snd_pcm_channel_info {
+    abi_uint channel;
+    abi_ulong offset;
+    abi_uint first;
+    abi_uint step;
+};
+
+struct target_snd_xferi {
+    abi_long result;
+    abi_ulong buf;
+    abi_long frames;
+};
+
+/* v4l2 ioctls */
+#define TARGET_VIDIOC_QUERYCAP          TARGET_IOR('V',  0, struct v4l2_capability)
+#define TARGET_VIDIOC_ENUM_FMT          TARGET_IOWR('V',  2, struct v4l2_fmtdesc)
+#define TARGET_VIDIOC_G_FMT             TARGET_IOWR('V',  4, struct target_v4l2_format)
+#define TARGET_VIDIOC_S_FMT             TARGET_IOWR('V',  5, struct target_v4l2_format)
+
+#define TARGET_VIDIOC_REQBUFS           TARGET_IOWR('V',  8, struct v4l2_requestbuffers)
+#define TARGET_VIDIOC_QUERYBUF          TARGET_IOWRU('V',  9)
+#define TARGET_VIDIOC_G_FBUF            TARGET_IORU('V', 10)
+#define TARGET_VIDIOC_OVERLAY           TARGET_IOW('V', 14, int)
+#define TARGET_VIDIOC_QBUF              TARGET_IOWRU('V', 15)
+
+#define TARGET_VIDIOC_EXPBUF            TARGET_IOWRU('V', 16)
+#define TARGET_VIDIOC_DQBUF             TARGET_IOWRU('V', 17)
+#define TARGET_VIDIOC_STREAMON          TARGET_IOW('V', 18, int)
+#define TARGET_VIDIOC_STREAMOFF         TARGET_IOW('V', 19, int)
+#define TARGET_VIDIOC_G_PARM            TARGET_IOWR('V', 21, struct v4l2_streamparm)
+#define TARGET_VIDIOC_S_PARM            TARGET_IOWR('V', 22, struct v4l2_streamparm)
+#define TARGET_VIDIOC_G_STD             TARGET_IOR('V', 23, uint64_t)
+#define TARGET_VIDIOC_S_STD             TARGET_IOW('V', 24, uint64_t)
+#define TARGET_VIDIOC_ENUMSTD           TARGET_IOWRU('V', 25)
+
+#define TARGET_VIDIOC_ENUMINPUT         TARGET_IOWRU('V', 26)
+#define TARGET_VIDIOC_G_CTRL            TARGET_IOWR('V', 27, struct v4l2_control)
+#define TARGET_VIDIOC_S_CTRL            TARGET_IOWR('V', 28, struct v4l2_control)
+
+#define TARGET_VIDIOC_G_TUNER           TARGET_IOWR('V', 29, struct v4l2_tuner)
+
+#define TARGET_VIDIOC_G_AUDIO           TARGET_IOR('V', 33, struct v4l2_audio)
+#define TARGET_VIDIOC_S_AUDIO           TARGET_IOW('V', 34, struct v4l2_audio)
+
+#define TARGET_VIDIOC_QUERYCTRL         TARGET_IOWR('V', 36, struct v4l2_queryctrl)
+#define TARGET_VIDIOC_QUERYMENU         TARGET_IOWR('V', 37, struct v4l2_querymenu)
+
+#define TARGET_VIDIOC_G_INPUT           TARGET_IOR('V', 38, int)
+#define TARGET_VIDIOC_S_INPUT           TARGET_IOWR('V', 39, int)
+
+#define TARGET_VIDIOC_G_EDID            TARGET_IOWRU('V', 40)
+#define TARGET_VIDIOC_S_EDID            TARGET_IOWRU('V', 41)
+
+#define TARGET_VIDIOC_G_OUTPUT          TARGET_IOR('V', 46, int)
+#define TARGET_VIDIOC_S_OUTPUT          TARGET_IOWR('V', 47, int)
+#define TARGET_VIDIOC_ENUMOUTPUT        TARGET_IOWR('V', 48, struct v4l2_output)
+
+#define TARGET_VIDIOC_G_AUDOUT          TARGET_IOR('V', 49, struct v4l2_audioout)
+#define TARGET_VIDIOC_S_AUDOUT          TARGET_IOW('V', 50, struct v4l2_audioout)
+
+#define TARGET_VIDIOC_G_MODULATOR       TARGET_IOWR('V', 54, struct v4l2_modulator)
+#define TARGET_VIDIOC_S_MODULATOR       TARGET_IOW('V', 55, struct v4l2_modulator)
+#define TARGET_VIDIOC_G_FREQUENCY       TARGET_IOWR('V', 56, struct v4l2_frequency)
+#define TARGET_VIDIOC_S_FREQUENCY       TARGET_IOW('V', 57, struct v4l2_frequency)
+#define TARGET_VIDIOC_CROPCAP           TARGET_IOWR('V', 58, struct v4l2_cropcap)
+#define TARGET_VIDIOC_G_CROP            TARGET_IOWR('V', 59, struct v4l2_crop)
+#define TARGET_VIDIOC_S_CROP            TARGET_IOW('V', 60, struct v4l2_crop)
+#define TARGET_VIDIOC_G_JPEGCOMP        TARGET_IOR('V', 61, struct v4l2_jpegcompression)
+#define TARGET_VIDIOC_S_JPEGCOMP        TARGET_IOW('V', 62, struct v4l2_jpegcompression)
+#define TARGET_VIDIOC_QUERYSTD          TARGET_IOR('V', 63, uint64_t)
+#define TARGET_VIDIOC_TRY_FMT           TARGET_IOWR('V', 64, struct target_v4l2_format)
+#define TARGET_VIDIOC_ENUMAUDIO         TARGET_IOWR('V', 65, struct v4l2_audio)
+#define TARGET_VIDIOC_ENUMAUDOUT        TARGET_IOWR('V', 66, struct v4l2_audioout)
+#define TARGET_VIDIOC_G_PRIORITY        TARGET_IOR('V', 67, int) /* enum v4l2_priority */
+#define TARGET_VIDIOC_S_PRIORITY        TARGET_IOW('V', 68, int) /* enum v4l2_priority */
+#define TARGET_VIDIOC_G_SLICED_VBI_CAP  TARGET_IOWR('V', 69, struct v4l2_sliced_vbi_cap)
+#define TARGET_VIDIOC_LOG_STATUS        TARGET_IO('V', 70)
+#define TARGET_VIDIOC_G_EXT_CTRLS       TARGET_IOWRU('V', 71)
+#define TARGET_VIDIOC_S_EXT_CTRLS       TARGET_IOWRU('V', 72)
+#define TARGET_VIDIOC_TRY_EXT_CTRLS     TARGET_IOWRU('V', 73)
+#define TARGET_VIDIOC_ENUM_FRAMESIZES   TARGET_IOWR('V', 74, struct v4l2_frmsizeenum)
+#define TARGET_VIDIOC_ENUM_FRAMEINTERVALS \
+                                        TARGET_IOWR('V', 75, struct v4l2_frmivalenum)
+#define TARGET_VIDIOC_G_ENC_INDEX       TARGET_IOR('V', 76, struct v4l2_enc_idx)
+#define TARGET_VIDIOC_ENCODER_CMD       TARGET_IOWR('V', 77, struct v4l2_encoder_cmd)
+#define TARGET_VIDIOC_TRY_ENCODER_CMD   TARGET_IOWR('V', 78, struct v4l2_encoder_cmd)
+#define TARGET_VIDIOC_DBG_S_REGISTER    TARGET_IOW('V', 79, struct v4l2_dbg_register)
+#define TARGET_VIDIOC_DBG_G_REGISTER    TARGET_IOWR('V', 80, struct v4l2_dbg_register)
+#define TARGET_VIDIOC_S_HW_FREQ_SEEK    TARGET_IOW('V', 82, struct v4l2_hw_freq_seek)
+
+#define TARGET_VIDIOC_S_DV_TIMINGS      TARGET_IOWR('V', 87, struct v4l2_dv_timings)
+#define TARGET_VIDIOC_G_DV_TIMINGS      TARGET_IOWR('V', 88, struct v4l2_dv_timings)
+
+#define TARGET_VIDIOC_DQEVENT           TARGET_IORU('V', 89)
+#define TARGET_VIDIOC_SUBSCRIBE_EVENT   TARGET_IOW('V', 90, \
+                                        struct v4l2_event_subscription)
+#define TARGET_VIDIOC_UNSUBSCRIBE_EVENT TARGET_IOW('V', 91, \
+                                        struct v4l2_event_subscription)
+#define TARGET_VIDIOC_CREATE_BUFS       TARGET_IOWR('V', 92, \
+                                        struct target_v4l2_create_buffers)
+#define TARGET_VIDIOC_G_SELECTION       TARGET_IOWR('V', 94, struct v4l2_selection)
+#define TARGET_VIDIOC_S_SELECTION       TARGET_IOWR('V', 95, struct v4l2_selection)
+#define TARGET_VIDIOC_DECODER_CMD       TARGET_IOWR('V', 96, struct v4l2_decoder_cmd)
+#define TARGET_VIDIOC_TRY_DECODER_CMD   TARGET_IOWR('V', 97, struct v4l2_decoder_cmd)
+#define TARGET_VIDIOC_ENUM_DV_TIMINGS   TARGET_IOWR('V', 98, struct v4l2_enum_dv_timings)
+#define TARGET_VIDIOC_QUERY_DV_TIMINGS  TARGET_IOR('V', 99, struct v4l2_dv_timings)
+#define TARGET_VIDIOC_DV_TIMINGS_CAP    TARGET_IOWR('V', 100, struct v4l2_dv_timings_cap)
+#define TARGET_VIDIOC_QUERY_EXT_CTRL    TARGET_IOWR('V', 103, struct v4l2_query_ext_ctrl)
+
+/* Audio */
+#define TARGET_SNDRV_SEQ_IOCTL_PVERSION         TARGET_IOR('S', 0x00, int)
+#define TARGET_SNDRV_SEQ_IOCTL_CLIENT_ID        TARGET_IOR('S', 0x01, int)
+#define TARGET_SNDRV_SEQ_IOCTL_RUNNING_MODE \
+                       TARGET_IOWR('S', 0x03, struct snd_seq_running_info)
+#define TARGET_SNDRV_SEQ_IOCTL_GET_CLIENT_INFO  \
+                       TARGET_IOWR('S', 0x10, struct snd_seq_client_info)
+#define TARGET_SNDRV_SEQ_IOCTL_SET_CLIENT_INFO  \
+                       TARGET_IOW('S', 0x11, struct snd_seq_client_info)
+#define TARGET_SNDRV_SEQ_IOCTL_CREATE_PORT      TARGET_IOWRU('S', 0x20)
+
+#define TARGET_SNDRV_SEQ_IOCTL_DELETE_PORT      TARGET_IOWU('S', 0x21)
+
+#define TARGET_SNDRV_SEQ_IOCTL_SUBSCRIBE_PORT   \
+                       TARGET_IOW('S', 0x30, struct snd_seq_port_subscribe)
+#define TARGET_SNDRV_SEQ_IOCTL_UNSUBSCRIBE_PORT \
+                       TARGET_IOW('S', 0x31, struct snd_seq_port_subscribe)
+
+#define TARGET_SNDRV_SEQ_IOCTL_QUERY_NEXT_CLIENT  \
+                       TARGET_IOWR('S', 0x51, struct snd_seq_client_info)
+#define TARGET_SNDRV_SEQ_IOCTL_QUERY_NEXT_PORT    TARGET_IOWRU('S', 0x52)
+
+#define TARGET_SNDRV_CTL_IOCTL_PVERSION TARGET_IOR('U', 0x00, int)
+#define TARGET_SNDRV_CTL_IOCTL_CARD_INFO \
+                             TARGET_IOR('U', 0x01, struct snd_ctl_card_info)
+#define TARGET_SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE TARGET_IOR('U', 0x30, int)
+#define TARGET_SNDRV_CTL_IOCTL_PCM_INFO \
+                             TARGET_IOWR('U', 0x31, struct snd_pcm_info)
+#define TARGET_SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE TARGET_IOW('U', 0x32, int)
+
+#define TARGET_SNDRV_PCM_IOCTL_PVERSION TARGET_IOR('A', 0x00, int)
+#define TARGET_SNDRV_PCM_IOCTL_INFO TARGET_IOR('A', 0x01, struct snd_pcm_info)
+#define TARGET_SNDRV_PCM_IOCTL_TSTAMP TARGET_IOW('A', 0x02, int)
+#define TARGET_SNDRV_PCM_IOCTL_TTSTAMP TARGET_IOW('A', 0x03, int)
+#define TARGET_SNDRV_PCM_IOCTL_HW_REFINE TARGET_IOWRU('A', 0x10)
+#define TARGET_SNDRV_PCM_IOCTL_HW_PARAMS TARGET_IOWRU('A', 0x11)
+#define TARGET_SNDRV_PCM_IOCTL_HW_FREE TARGET_IO('A', 0x12)
+#define TARGET_SNDRV_PCM_IOCTL_SW_PARAMS TARGET_IOWRU('A', 0x13)
+#define TARGET_SNDRV_PCM_IOCTL_USER_PVERSION TARGET_IOW('A', 0x04, int)
+#define TARGET_SNDRV_PCM_IOCTL_SYNC_PTR TARGET_IOWR('A', 0x23, \
+                                        struct target_snd_pcm_sync_ptr)
+#define TARGET_SNDRV_PCM_IOCTL_CHANNEL_INFO TARGET_IORU('A', 0x32)
+#define TARGET_SNDRV_PCM_IOCTL_PREPARE TARGET_IO('A', 0x40)
+#define TARGET_SNDRV_PCM_IOCTL_RESET TARGET_IO('A', 0x41)
+#define TARGET_SNDRV_PCM_IOCTL_START TARGET_IO('A', 0x42)
+#define TARGET_SNDRV_PCM_IOCTL_DROP TARGET_IO('A', 0x43)
+#define TARGET_SNDRV_PCM_IOCTL_REWIND TARGET_IOW('A', 0x46, abi_ulong)
+#define TARGET_SNDRV_PCM_IOCTL_XRUN TARGET_IO('A', 0x48)
+#define TARGET_SNDRV_PCM_IOCTL_WRITEI_FRAMES   TARGET_IOWU('A', 0x50)
+#define TARGET_SNDRV_PCM_IOCTL_READI_FRAMES TARGET_IORU('A', 0x51)
+
+#define TARGET_MPT3IOCINFO TARGET_IOWRU('L', 17)
+#define TARGET_MPT3COMMAND TARGET_IOWRU('L', 20)
+#define TARGET_MPT3EVENTQUERY TARGET_IOWRU('L', 21)
+#define TARGET_MPT3EVENTENABLE TARGET_IOWRU('L', 22)
+#define TARGET_MPT3EVENTREPORT TARGET_IOWRU('L', 23)
+#define TARGET_MPT3HARDRESET TARGET_IOWRU('L', 24)
+#define TARGET_MPT3BTDHMAPPING TARGET_IOWRU('L', 31)
+
+/* diag buffer support */
+#define TARGET_MPT3DIAGREGISTER TARGET_IOWRU('L', 26)
+#define TARGET_MPT3DIAGRELEASE TARGET_IOWRU('L', 27)
+#define TARGET_MPT3DIAGUNREGISTER TARGET_IOWRU('L', 28)
+#define TARGET_MPT3DIAGQUERY TARGET_IOWRU('L', 29)
+#define TARGET_MPT3DIAGREADBUFFER TARGET_IOWRU('L', 30)
+
+#define TARGET_MEGASAS_IOC_FIRMWARE32    0xc1144d01
+#define MEGASAS_IOC_FIRMWARE32           0xc1144d01
+#define TARGET_MEGASAS_IOC_FIRMWARE      0xc1944d01
+#define MEGASAS_IOC_FIRMWARE             0xc1944d01
+#define TARGET_LINUX_SG_GET_VERSION_NUM  0x2282
+#define LINUX_SG_GET_VERSION_NUM         0x2282
+#define TARGET_LINUX_SG_IO               0x2285
+#define LINUX_SG_IO                      0x2285
+
+#define TARGET_UI_SET_EVBIT		TARGET_IOW('U', 100, int)
+#define TARGET_UI_SET_KEYBIT	TARGET_IOW('U', 101, int)
+#define TARGET_UI_SET_RELBIT	TARGET_IOW('U', 102, int)
+#define TARGET_UI_DEV_CREATE    TARGET_IO('U', 1)
+#define TARGET_UI_DEV_DESTROY   TARGET_IO('U', 2)
 #endif

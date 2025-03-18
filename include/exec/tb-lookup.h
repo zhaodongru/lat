@@ -15,6 +15,7 @@
 
 #include "exec/exec-all.h"
 #include "exec/tb-hash.h"
+#include "latx-options.h"
 
 /* Might cause an exception, so have a longjmp destination ready */
 static inline TranslationBlock *tb_lookup(CPUState *cpu, target_ulong pc,
@@ -23,9 +24,16 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, target_ulong pc,
 {
     TranslationBlock *tb;
     uint32_t hash;
+#ifdef CONFIG_LATX_PROFILER
+    TCGProfile *prof = &tcg_ctx->prof;
+#endif
 
     /* we should never be trying to look up an INVALID tb */
     tcg_debug_assert(!(cflags & CF_INVALID));
+    /* return the tb pointer of HPC */
+    if(pc > (size_t)tcg_ctx->code_gen_buffer){
+        return tb = tcg_tb_lookup(pc);
+    }
 
     hash = tb_jmp_cache_hash_func(pc);
     tb = qatomic_rcu_read(&cpu->tb_jmp_cache[hash]);
@@ -36,13 +44,27 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, target_ulong pc,
                tb->flags == flags &&
                tb->trace_vcpu_dstate == *cpu->trace_dstate &&
                tb_cflags(tb) == cflags)) {
+#ifdef CONFIG_LATX_PROFILER
+        qatomic_inc(&prof->hash_count);
+#endif
         return tb;
     }
+    mmap_lock();
     tb = tb_htable_lookup(cpu, pc, cs_base, flags, cflags);
     if (tb == NULL) {
+        mmap_unlock();
         return NULL;
     }
     qatomic_set(&cpu->tb_jmp_cache[hash], tb);
+#ifdef CONFIG_LATX
+    if (!close_latx_parallel && !(cpu->tcg_cflags & CF_PARALLEL)) {
+        latx_fast_jmp_cache_add(hash, tb);
+    }
+#endif
+    mmap_unlock();
+#ifdef CONFIG_LATX_PROFILER
+    qatomic_inc(&prof->qht_count);
+#endif
     return tb;
 }
 

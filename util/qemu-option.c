@@ -971,7 +971,7 @@ QemuOpts *qemu_opts_parse_noisily(QemuOptsList *list, const char *params,
 void qemu_opts_set_defaults(QemuOptsList *list, const char *params,
                             int permit_abbrev)
 {
-    QemuOpts *opts;
+    QemuOpts *opts __attribute__((unused));
 
     opts = opts_parse(list, params, permit_abbrev, true, false, NULL, NULL);
     assert(opts);

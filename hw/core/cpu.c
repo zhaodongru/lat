@@ -94,21 +94,6 @@ static void cpu_common_get_memory_mapping(CPUState *cpu,
     error_setg(errp, "Obtaining memory mappings is unsupported on this CPU.");
 }
 
-/* Resetting the IRQ comes from across the code base so we take the
- * BQL here if we need to.  cpu_interrupt assumes it is held.*/
-void cpu_reset_interrupt(CPUState *cpu, int mask)
-{
-    bool need_lock = !qemu_mutex_iothread_locked();
-
-    if (need_lock) {
-        qemu_mutex_lock_iothread();
-    }
-    cpu->interrupt_request &= ~mask;
-    if (need_lock) {
-        qemu_mutex_unlock_iothread();
-    }
-}
-
 void cpu_exit(CPUState *cpu)
 {
     qatomic_set(&cpu->exit_request, 1);
@@ -195,25 +180,12 @@ static bool cpu_common_virtio_is_big_endian(CPUState *cpu)
  * XXX the following #if is always true because this is a common_ss
  * module, so target CONFIG_* is never defined.
  */
-#if !defined(CONFIG_USER_ONLY)
-GuestPanicInformation *cpu_get_crash_info(CPUState *cpu)
-{
-    CPUClass *cc = CPU_GET_CLASS(cpu);
-    GuestPanicInformation *res = NULL;
-
-    if (cc->get_crash_info) {
-        res = cc->get_crash_info(cpu);
-    }
-    return res;
-}
-#endif
 
 void cpu_dump_state(CPUState *cpu, FILE *f, int flags)
 {
     CPUClass *cc = CPU_GET_CLASS(cpu);
 
     if (cc->dump_state) {
-        cpu_synchronize_state(cpu);
         cc->dump_state(cpu, f, flags);
     }
 }
@@ -278,7 +250,7 @@ static void cpu_common_parse_features(const char *typename, char *features,
                                       Error **errp)
 {
     char *val;
-    static bool cpu_globals_initialized;
+    static bool cpu_globals_initialized __attribute__((unused));
     /* Single "key=value" string being parsed */
     char *featurestr = features ? strtok(features, ",") : NULL;
 
@@ -325,7 +297,7 @@ static void cpu_common_realizefn(DeviceState *dev, Error **errp)
     }
 
     if (dev->hotplugged) {
-        cpu_synchronize_post_init(cpu);
+        //cpu_synchronize_post_init(cpu);
         cpu_resume(cpu);
     }
 

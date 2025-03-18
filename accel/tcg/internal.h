@@ -17,4 +17,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, target_ulong pc,
 
 void QEMU_NORETURN cpu_io_recompile(CPUState *cpu, uintptr_t retaddr);
 
+TranslationBlock *tb_link_page(TranslationBlock *tb, tb_page_addr_t phys_pc,
+    tb_page_addr_t phys_page2);
+
 #endif /* ACCEL_TCG_INTERNAL_H */

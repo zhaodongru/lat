@@ -57,6 +57,9 @@
 #ifndef CPU_LDST_H
 #define CPU_LDST_H
 
+#if defined(CONFIG_LATX_KZT)
+extern int option_kzt;
+#endif
 #if defined(CONFIG_USER_ONLY)
 /* sparc32plus has 64bit long but 32bit space address
  * this can make bad result with g2h() and h2g()
@@ -89,11 +92,21 @@ static inline void *g2h(CPUState *cs, abi_ptr x)
 
 static inline bool guest_addr_valid_untagged(abi_ulong x)
 {
+#if defined(CONFIG_LATX_KZT)
+    if (option_kzt) {
+        return true;
+    } else
+#endif
     return x <= GUEST_ADDR_MAX;
 }
 
 static inline bool guest_range_valid_untagged(abi_ulong start, abi_ulong len)
 {
+#if defined(CONFIG_LATX_KZT)
+    if (option_kzt) {
+        return true;
+    } else
+#endif
     return len - 1 <= GUEST_ADDR_MAX && start <= GUEST_ADDR_MAX - len + 1;
 }
 

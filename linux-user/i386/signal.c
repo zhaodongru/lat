@@ -20,8 +20,18 @@
 #include "qemu.h"
 #include "signal-common.h"
 #include "linux-user/trace.h"
+#ifdef CONFIG_LATX
+#include "latx-options.h"
+#include "reg-map.h"
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+#include <lasxintrin.h>
+#endif
+#endif
 
 /* from the Linux kernel - /arch/x86/include/uapi/asm/sigcontext.h */
+#define TARGET_FP_XSTATE_MAGIC1         0x46505853U /* FPXS */
+#define TARGET_FP_XSTATE_MAGIC2         0x46505845U /* FPXE */
+#define TARGET_FP_XSTATE_MAGIC2_SIZE    4
 
 struct target_fpreg {
     uint16_t significand[4];
@@ -38,6 +48,35 @@ struct target_xmmreg {
     uint32_t element[4];
 };
 
+struct target_fpx_sw_bytes {
+    uint32_t magic1;
+    uint32_t extended_size;
+    uint64_t xfeatures;
+    uint32_t xstate_size;
+    uint32_t reserved[7];
+};
+QEMU_BUILD_BUG_ON(sizeof(struct target_fpx_sw_bytes) != 12*4);
+
+struct target_fpstate_fxsave {
+    /* FXSAVE format */
+    uint16_t cw;
+    uint16_t sw;
+    uint16_t twd;
+    uint16_t fop;
+    uint64_t rip;
+    uint64_t rdp;
+    uint32_t mxcsr;
+    uint32_t mxcsr_mask;
+    uint32_t st_space[32];
+    uint32_t xmm_space[64];
+    uint32_t hw_reserved[12];
+    struct target_fpx_sw_bytes sw_reserved;
+    uint8_t xfeatures[];
+};
+#define TARGET_FXSAVE_SIZE   sizeof(struct target_fpstate_fxsave)
+QEMU_BUILD_BUG_ON(TARGET_FXSAVE_SIZE != 512);
+QEMU_BUILD_BUG_ON(offsetof(struct target_fpstate_fxsave, sw_reserved) != 464);
+
 struct target_fpstate_32 {
     /* Regular FPU environment */
     uint32_t cw;
@@ -51,34 +90,21 @@ struct target_fpstate_32 {
     uint16_t  status;
     uint16_t  magic;          /* 0xffff = regular FPU data only */
 
-    /* FXSR FPU environment */
-    uint32_t _fxsr_env[6];   /* FXSR FPU env is ignored */
-    uint32_t mxcsr;
-    uint32_t reserved;
-    struct target_fpxreg fxsr_st[8]; /* FXSR FPU reg data is ignored */
-    struct target_xmmreg xmm[8];
-    uint32_t padding[56];
+    struct target_fpstate_fxsave fxsave;
 };
 
-struct target_fpstate_64 {
-    /* FXSAVE format */
-    uint16_t cw;
-    uint16_t sw;
-    uint16_t twd;
-    uint16_t fop;
-    uint64_t rip;
-    uint64_t rdp;
-    uint32_t mxcsr;
-    uint32_t mxcsr_mask;
-    uint32_t st_space[32];
-    uint32_t xmm_space[64];
-    uint32_t reserved[24];
-};
+/*
+ * For simplicity, setup_frame aligns struct target_fpstate_32 to
+ * 16 bytes, so ensure that the FXSAVE area is also aligned.
+ */
+QEMU_BUILD_BUG_ON(offsetof(struct target_fpstate_32, fxsave) & 15);
 
 #ifndef TARGET_X86_64
 # define target_fpstate target_fpstate_32
+# define TARGET_FPSTATE_FXSAVE_OFFSET offsetof(struct target_fpstate_32, fxsave)
 #else
-# define target_fpstate target_fpstate_64
+# define target_fpstate target_fpstate_fxsave
+# define TARGET_FPSTATE_FXSAVE_OFFSET 0
 #endif
 
 struct target_sigcontext_32 {
@@ -162,10 +188,18 @@ struct sigframe {
     abi_ulong pretcode;
     int sig;
     struct target_sigcontext sc;
-    struct target_fpstate fpstate;
     abi_ulong extramask[TARGET_NSIG_WORDS-1];
     char retcode[8];
+
+    /*
+     * This field will be 16-byte aligned in memory.  Applying QEMU_ALIGNED
+     * to it ensures that the base of the frame has an appropriate alignment
+     * too.
+     */
+    struct target_fpstate fpstate QEMU_ALIGNED(8);
 };
+#define TARGET_SIGFRAME_FXSAVE_OFFSET (                                    \
+    offsetof(struct sigframe, fpstate) + TARGET_FPSTATE_FXSAVE_OFFSET)
 
 struct rt_sigframe {
     abi_ulong pretcode;
@@ -174,9 +208,22 @@ struct rt_sigframe {
     abi_ulong puc;
     struct target_siginfo info;
     struct target_ucontext uc;
-    struct target_fpstate fpstate;
     char retcode[8];
+    struct target_fpstate fpstate QEMU_ALIGNED(8);
 };
+
+#define TARGET_RT_SIGFRAME_FXSAVE_OFFSET (                                 \
+    offsetof(struct rt_sigframe, fpstate) + TARGET_FPSTATE_FXSAVE_OFFSET)
+
+/*
+ * Verify that vdso-asmoffset.h constants match.
+ */
+#include "i386/vdso-asmoffset.h"
+
+QEMU_BUILD_BUG_ON(offsetof(struct sigframe, sc.eip)
+                  != SIGFRAME_SIGCONTEXT_eip);
+QEMU_BUILD_BUG_ON(offsetof(struct rt_sigframe, uc.tuc_mcontext.eip)
+                  != RT_SIGFRAME_SIGCONTEXT_eip);
 
 #else
 
@@ -184,21 +231,211 @@ struct rt_sigframe {
     abi_ulong pretcode;
     struct target_ucontext uc;
     struct target_siginfo info;
-    struct target_fpstate fpstate;
+    struct target_fpstate fpstate QEMU_ALIGNED(16);
 };
 
+#define TARGET_RT_SIGFRAME_FXSAVE_OFFSET (                                 \
+    offsetof(struct rt_sigframe, fpstate) + TARGET_FPSTATE_FXSAVE_OFFSET)
+#endif
+
+#ifdef CONFIG_LATX
+#ifdef CONFIG_LOONGARCH_NEW_WORLD
+
+__asm__(".macro parse_v var val\n\t"
+        "\\var = \\val\n\t"
+        ".endm\n\t");
+
+/* Match an individual register number and assign to \var */
+#define _IFC_REG(r, n)      \
+    ".ifc \\r, $" #r "\n\t" \
+    "\\var = " #n "\n\t"    \
+    ".endif\n\t"
+
+__asm__(".macro parse_r var r\n\t"
+    "\\var = -1\n\t"
+    _IFC_REG(r0,0) _IFC_REG(r1,1)  _IFC_REG(r2,2)  _IFC_REG(r3,3)
+    _IFC_REG(r4,4)   _IFC_REG(r5,5)  _IFC_REG(r6,6)  _IFC_REG(r7,7)
+    _IFC_REG(r8,8)   _IFC_REG(r9,9)  _IFC_REG(r10,10) _IFC_REG(r11,11)
+    _IFC_REG(r12,12)  _IFC_REG(r13,13) _IFC_REG(r14,14) _IFC_REG(r15,15)
+    _IFC_REG(r16,16)  _IFC_REG(r17,17) _IFC_REG(r18,18) _IFC_REG(r17,19)
+    _IFC_REG(r20,20)  _IFC_REG(r21,21)  _IFC_REG(r22,22) _IFC_REG(r23,23)
+    _IFC_REG(r24,24)  _IFC_REG(r25,25) _IFC_REG(r26,26) _IFC_REG(r27,27)
+    _IFC_REG(r28,28)  _IFC_REG(r29,29) _IFC_REG(r30,30) _IFC_REG(r31,31)
+    ".iflt \\var\n\t"
+    ".error \"Unable to parse register name \\r\"\n\t"
+    ".endif\n\t"
+    ".endm");
+
+__asm__(".macro parse_xr var r\n\t"
+    "\\var = -1\n\t"
+    _IFC_REG(xr0,0)   _IFC_REG(xr1,1)   _IFC_REG(xr2,2)   _IFC_REG(xr3,3)
+    _IFC_REG(xr4,4)   _IFC_REG(xr5,5)   _IFC_REG(xr6,6)   _IFC_REG(xr7,7)
+    _IFC_REG(xr8,8)   _IFC_REG(xr9,9)   _IFC_REG(xr10,10) _IFC_REG(xr11,11)
+    _IFC_REG(xr12,12) _IFC_REG(xr13,13) _IFC_REG(xr14,14) _IFC_REG(xr15,15)
+    _IFC_REG(xr16,16) _IFC_REG(xr17,17) _IFC_REG(xr18,18) _IFC_REG(xr19,19)
+    _IFC_REG(xr20,20) _IFC_REG(xr21,21) _IFC_REG(xr22,22) _IFC_REG(xr23,23)
+    _IFC_REG(xr24,24) _IFC_REG(xr25,25) _IFC_REG(xr26,26) _IFC_REG(xr27,27)
+    _IFC_REG(xr28,28) _IFC_REG(xr29,29) _IFC_REG(xr30,30) _IFC_REG(xr31,31)
+    ".iflt \\var\n\t"
+    ".error \"Unable to parse register name \\r\"\n\t"
+    ".endif\n\t"
+    ".endm");
+
+__asm__(".macro EX_XV insn, reg, src, offs \n\t"
+        "parse_v __insn, \\insn \n\t"
+        "parse_v __offs, \\offs \n\t"
+        "parse_r __src, \\src \n\t"
+        "parse_xr __reg, \\reg \n\t"
+        ".word __insn << 22 | (__offs & 0xfff) << 10 | __src << 5 | __reg \n\t"
+        ".endm");
+
+__asm__(".macro xvst reg, src, offs \n\t"
+        "EX_XV 0xb3 \\reg, \\src, \\offs \n\t"
+        ".endm");
+
+__asm__(".macro xvld reg, src, offs \n\t"
+        "EX_XV 0xb2 \\reg, \\src, \\offs \n\t"
+        ".endm");
+
+#endif
+
+#define _save_one_xmm(n, map)                                           \
+    do {                                                                \
+        if (option_enable_lasx) {                                       \
+            asm volatile (                                              \
+                "xvst $xr"#map",%0\r\n"                                 \
+                : "=m" (env->xmm_regs[n])                                \
+                :                                                       \
+                : "memory"                                               \
+            );                                                          \
+        } else {                                                        \
+            asm volatile (                                              \
+                "vst $vr"#map",%0\r\n"                                  \
+                : "=m" (env->xmm_regs[n])                                \
+                :                                                       \
+                : "memory"                                               \
+            );                                                          \
+        }                                                               \
+    } while (0)
+
+#define _load_one_xmm(n, map)                                           \
+    do {                                                                \
+        if (option_enable_lasx) {                                       \
+            asm volatile (                                              \
+                "xvld $xr"#map",%0\r\n"                                 \
+                :                                                       \
+                : "m" (env->xmm_regs[n])                                 \
+                :                                                       \
+            );                                                          \
+        } else {                                                        \
+            asm volatile (                                              \
+                "vld $vr"#map",%0\r\n"                                  \
+                :                                                       \
+                : "m" (env->xmm_regs[n])                                 \
+                :                                                       \
+            );                                                          \
+        }                                                               \
+    } while (0)
+
+#define load_one_xmm(n, map) _load_one_xmm(n, map)
+#define save_one_xmm(n, map) _save_one_xmm(n, map)
+
+static void save_xmm_to_env(CPUX86State *env)
+{
+    if (!option_save_xmm && !env->fpu_clobber) {
+        save_one_xmm(0, XMM0_MAPS);
+        save_one_xmm(1, XMM1_MAPS);
+        save_one_xmm(2, XMM2_MAPS);
+        save_one_xmm(3, XMM3_MAPS);
+        save_one_xmm(4, XMM4_MAPS);
+        save_one_xmm(5, XMM5_MAPS);
+        save_one_xmm(6, XMM6_MAPS);
+        save_one_xmm(7, XMM7_MAPS);
+#ifdef TARGET_X86_64
+        save_one_xmm(8, XMM8_MAPS);
+        save_one_xmm(9, XMM9_MAPS);
+        save_one_xmm(10, XMM10_MAPS);
+        save_one_xmm(11, XMM11_MAPS);
+        save_one_xmm(12, XMM12_MAPS);
+        save_one_xmm(13, XMM13_MAPS);
+        save_one_xmm(14, XMM14_MAPS);
+        save_one_xmm(15, XMM15_MAPS);
+#endif
+    }
+}
+
+static void load_xmm_from_env(CPUX86State *env)
+{
+    if (!option_save_xmm && !env->fpu_clobber) {
+        load_one_xmm(0, XMM0_MAPS);
+        load_one_xmm(1, XMM1_MAPS);
+        load_one_xmm(2, XMM2_MAPS);
+        load_one_xmm(3, XMM3_MAPS);
+        load_one_xmm(4, XMM4_MAPS);
+        load_one_xmm(5, XMM5_MAPS);
+        load_one_xmm(6, XMM6_MAPS);
+        load_one_xmm(7, XMM7_MAPS);
+#ifdef TARGET_X86_64
+        load_one_xmm(8, XMM8_MAPS);
+        load_one_xmm(9, XMM9_MAPS);
+        load_one_xmm(10, XMM10_MAPS);
+        load_one_xmm(11, XMM11_MAPS);
+        load_one_xmm(12, XMM12_MAPS);
+        load_one_xmm(13, XMM13_MAPS);
+        load_one_xmm(14, XMM14_MAPS);
+        load_one_xmm(15, XMM15_MAPS);
+#endif
+    }
+}
 #endif
 
 /*
  * Set up a signal frame.
  */
 
-/* XXX: save x87 state */
+static void xsave_sigcontext(CPUX86State *env, struct target_fpstate_fxsave *fxsave,
+                              abi_ulong fxsave_addr)
+{
+    if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE)) {
+        /* fxsave_addr must be 16 byte aligned for fxsave */
+        assert(!(fxsave_addr & 0xf));
+
+        cpu_x86_fxsave(env, fxsave_addr);
+        __put_user(0, &fxsave->sw_reserved.magic1);
+    } else {
+        uint32_t xstate_size = xsave_area_size(env->xcr0);
+        uint32_t xfeatures_size = xstate_size - TARGET_FXSAVE_SIZE;
+
+        /*
+         * extended_size is the offset from fpstate_addr to right after the end
+         * of the extended save states.  On 32-bit that includes the legacy
+         * FSAVE area.
+         */
+        uint32_t extended_size = TARGET_FPSTATE_FXSAVE_OFFSET
+            + xstate_size + TARGET_FP_XSTATE_MAGIC2_SIZE;
+
+        /* fxsave_addr must be 64 byte aligned for xsave */
+        assert(!(fxsave_addr & 0x3f));
+
+        /* Zero the header, XSAVE *adds* features to an existing save state.  */
+        memset(fxsave->xfeatures, 0, 64);
+        cpu_x86_xsave(env, fxsave_addr);
+        __put_user(TARGET_FP_XSTATE_MAGIC1, &fxsave->sw_reserved.magic1);
+        __put_user(extended_size, &fxsave->sw_reserved.extended_size);
+        __put_user(env->xcr0, &fxsave->sw_reserved.xfeatures);
+        __put_user(xstate_size, &fxsave->sw_reserved.xstate_size);
+        __put_user(TARGET_FP_XSTATE_MAGIC2, (uint32_t *) &fxsave->xfeatures[xfeatures_size]);
+    }
+}
+
 static void setup_sigcontext(struct target_sigcontext *sc,
         struct target_fpstate *fpstate, CPUX86State *env, abi_ulong mask,
         abi_ulong fpstate_addr)
 {
     CPUState *cs = env_cpu(env);
+#ifdef CONFIG_LATX
+    save_xmm_to_env(env);
+#endif
 #ifndef TARGET_X86_64
     uint16_t magic;
 
@@ -215,7 +452,9 @@ static void setup_sigcontext(struct target_sigcontext *sc,
     __put_user(env->regs[R_EDX], &sc->edx);
     __put_user(env->regs[R_ECX], &sc->ecx);
     __put_user(env->regs[R_EAX], &sc->eax);
-    __put_user(cs->exception_index, &sc->trapno);
+//printf("index = %d\n", cs->previous_exception_index);
+    __put_user(cs->previous_exception_index, &sc->trapno);
+cs->previous_exception_index = -1;
     __put_user(env->error_code, &sc->err);
     __put_user(env->eip, &sc->eip);
     __put_user(env->segs[R_CS].selector, (unsigned int *)&sc->cs);
@@ -225,13 +464,14 @@ static void setup_sigcontext(struct target_sigcontext *sc,
 
     cpu_x86_fsave(env, fpstate_addr, 1);
     fpstate->status = fpstate->sw;
-    magic = 0xffff;
+    if (!(env->features[FEAT_1_EDX] & CPUID_FXSR)) {
+        magic = 0xffff;
+    } else {
+        xsave_sigcontext(env, &fpstate->fxsave,
+                          fpstate_addr + TARGET_FPSTATE_FXSAVE_OFFSET);
+        magic = 0;
+    }
     __put_user(magic, &fpstate->magic);
-    __put_user(fpstate_addr, &sc->fpstate);
-
-    /* non-iBCS2 extensions.. */
-    __put_user(mask, &sc->oldmask);
-    __put_user(env->cr[2], &sc->cr2);
 #else
     __put_user(env->regs[R_EDI], &sc->rdi);
     __put_user(env->regs[R_ESI], &sc->rsi);
@@ -260,16 +500,13 @@ static void setup_sigcontext(struct target_sigcontext *sc,
     __put_user((uint16_t)0, &sc->gs);
     __put_user((uint16_t)0, &sc->fs);
     __put_user(env->segs[R_SS].selector, &sc->ss);
+    xsave_sigcontext(env, fpstate, fpstate_addr);
+#endif
 
+    __put_user(fpstate_addr, &sc->fpstate);
+    /* non-iBCS2 extensions.. */
     __put_user(mask, &sc->oldmask);
     __put_user(env->cr[2], &sc->cr2);
-
-    /* fpstate_addr must be 16 byte aligned for fxsave */
-    assert(!(fpstate_addr & 0xf));
-
-    cpu_x86_fxsave(env, fpstate_addr);
-    __put_user(fpstate_addr, &sc->fpstate);
-#endif
 }
 
 /*
@@ -277,7 +514,7 @@ static void setup_sigcontext(struct target_sigcontext *sc,
  */
 
 static inline abi_ulong
-get_sigframe(struct target_sigaction *ka, CPUX86State *env, size_t frame_size)
+get_sigframe(struct target_sigaction *ka, CPUX86State *env, size_t fxsave_offset)
 {
     unsigned long esp;
 
@@ -301,14 +538,34 @@ get_sigframe(struct target_sigaction *ka, CPUX86State *env, size_t frame_size)
 #endif
     }
 
-#ifndef TARGET_X86_64
-    return (esp - frame_size) & -8ul;
-#else
-    return ((esp - frame_size) & (~15ul)) - 8;
-#endif
+    if (!(env->features[FEAT_1_EDX] & CPUID_FXSR)) {
+        return (esp - (fxsave_offset + TARGET_FXSAVE_SIZE)) & -8ul;
+    } else if (!(env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE)) {
+        return ((esp - TARGET_FXSAVE_SIZE) & -16ul) - fxsave_offset;
+    } else {
+        size_t xstate_size =
+               xsave_area_size(env->xcr0) + TARGET_FP_XSTATE_MAGIC2_SIZE;
+        return ((esp - xstate_size) & -64ul) - fxsave_offset;
+    }
 }
 
 #ifndef TARGET_X86_64
+static void install_sigtramp(void *tramp)
+{
+    /* This is popl %eax ; movl $syscall,%eax ; int $0x80 */
+    __put_user(0xb858, (uint16_t *)(tramp + 0));
+    __put_user(TARGET_NR_sigreturn, (int32_t *)(tramp + 2));
+    __put_user(0x80cd, (uint16_t *)(tramp + 6));
+}
+
+static void install_rt_sigtramp(void *tramp)
+{
+    /* This is movl $syscall,%eax ; int $0x80 */
+    __put_user(0xb8, (uint8_t *)(tramp + 0));
+    __put_user(TARGET_NR_rt_sigreturn, (int32_t *)(tramp + 1));
+    __put_user(0x80cd, (uint16_t *)(tramp + 5));
+}
+
 /* compare linux/arch/i386/kernel/signal.c:setup_frame() */
 void setup_frame(int sig, struct target_sigaction *ka,
                  target_sigset_t *set, CPUX86State *env)
@@ -317,7 +574,7 @@ void setup_frame(int sig, struct target_sigaction *ka,
     struct sigframe *frame;
     int i;
 
-    frame_addr = get_sigframe(ka, env, sizeof(*frame));
+    frame_addr = get_sigframe(ka, env, TARGET_SIGFRAME_FXSAVE_OFFSET);
     trace_user_setup_frame(env, frame_addr);
 
     if (!lock_user_struct(VERIFY_WRITE, frame, frame_addr, 0))
@@ -337,16 +594,9 @@ void setup_frame(int sig, struct target_sigaction *ka,
     if (ka->sa_flags & TARGET_SA_RESTORER) {
         __put_user(ka->sa_restorer, &frame->pretcode);
     } else {
-        uint16_t val16;
-        abi_ulong retcode_addr;
-        retcode_addr = frame_addr + offsetof(struct sigframe, retcode);
-        __put_user(retcode_addr, &frame->pretcode);
-        /* This is popl %eax ; movl $,%eax ; int $0x80 */
-        val16 = 0xb858;
-        __put_user(val16, (uint16_t *)(frame->retcode+0));
-        __put_user(TARGET_NR_sigreturn, (int *)(frame->retcode+2));
-        val16 = 0x80cd;
-        __put_user(val16, (uint16_t *)(frame->retcode+6));
+        /* This is no longer used, but is retained for ABI compatibility. */
+        install_sigtramp(frame->retcode);
+        __put_user(default_sigreturn, &frame->pretcode);
     }
 
     /* Set up registers for signal handler */
@@ -380,7 +630,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     struct rt_sigframe *frame;
     int i;
 
-    frame_addr = get_sigframe(ka, env, sizeof(*frame));
+    frame_addr = get_sigframe(ka, env, TARGET_RT_SIGFRAME_FXSAVE_OFFSET);
     trace_user_setup_rt_frame(env, frame_addr);
 
     if (!lock_user_struct(VERIFY_WRITE, frame, frame_addr, 0))
@@ -399,7 +649,11 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     }
 
     /* Create the ucontext.  */
-    __put_user(0, &frame->uc.tuc_flags);
+    if (env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE) {
+        __put_user(1, &frame->uc.tuc_flags);
+    } else {
+        __put_user(0, &frame->uc.tuc_flags);
+    }
     __put_user(0, &frame->uc.tuc_link);
     target_save_altstack(&frame->uc.tuc_stack, env);
     setup_sigcontext(&frame->uc.tuc_mcontext, &frame->fpstate, env,
@@ -411,24 +665,18 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
 
     /* Set up to return from userspace.  If provided, use a stub
        already in userspace.  */
-#ifndef TARGET_X86_64
     if (ka->sa_flags & TARGET_SA_RESTORER) {
         __put_user(ka->sa_restorer, &frame->pretcode);
     } else {
-        uint16_t val16;
-        addr = frame_addr + offsetof(struct rt_sigframe, retcode);
-        __put_user(addr, &frame->pretcode);
-        /* This is movl $,%eax ; int $0x80 */
-        __put_user(0xb8, (char *)(frame->retcode+0));
-        __put_user(TARGET_NR_rt_sigreturn, (int *)(frame->retcode+1));
-        val16 = 0x80cd;
-        __put_user(val16, (uint16_t *)(frame->retcode+5));
-    }
+#ifdef TARGET_X86_64
+        /* For x86_64, SA_RESTORER is required ABI.  */
+        goto give_sigsegv;
 #else
-    /* XXX: Would be slightly better to return -EFAULT here if test fails
-       assert(ka->sa_flags & TARGET_SA_RESTORER); */
-    __put_user(ka->sa_restorer, &frame->pretcode);
+        /* This is no longer used, but is retained for ABI compatibility. */
+        install_rt_sigtramp(frame->retcode);
+        __put_user(default_rt_sigreturn, &frame->pretcode);
 #endif
+    }
 
     /* Set up registers for signal handler */
     env->regs[R_ESP] = frame_addr;
@@ -438,6 +686,9 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     env->regs[R_EAX] = sig;
     env->regs[R_EDX] = (unsigned long)&frame->info;
     env->regs[R_ECX] = (unsigned long)&frame->uc;
+    cpu_x86_load_seg(env, R_DS, __USER_DS);
+    cpu_x86_load_seg(env, R_ES, __USER_DS);
+    cpu_x86_load_seg(env, R_SS, __USER_DS);
 #else
     env->regs[R_EAX] = 0;
     env->regs[R_EDI] = sig;
@@ -445,10 +696,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     env->regs[R_EDX] = (unsigned long)&frame->uc;
 #endif
 
-    cpu_x86_load_seg(env, R_DS, __USER_DS);
-    cpu_x86_load_seg(env, R_ES, __USER_DS);
     cpu_x86_load_seg(env, R_CS, __USER_CS);
-    cpu_x86_load_seg(env, R_SS, __USER_DS);
     env->eflags &= ~TF_MASK;
 
     unlock_user_struct(frame, frame_addr, 1);
@@ -459,10 +707,37 @@ give_sigsegv:
     force_sigsegv(sig);
 }
 
+static int xrstor_sigcontext(CPUX86State *env, struct target_fpstate_fxsave *fxsave,
+                             abi_ulong fxsave_addr)
+{
+    if (env->features[FEAT_1_ECX] & CPUID_EXT_XSAVE) {
+        uint32_t extended_size = tswapl(fxsave->sw_reserved.extended_size);
+        uint32_t xstate_size = tswapl(fxsave->sw_reserved.xstate_size);
+        uint32_t xfeatures_size = xstate_size - TARGET_FXSAVE_SIZE;
+
+        /* Linux checks MAGIC2 using xstate_size, not extended_size.  */
+        if (tswapl(fxsave->sw_reserved.magic1) == TARGET_FP_XSTATE_MAGIC1 &&
+            extended_size >= TARGET_FPSTATE_FXSAVE_OFFSET + xstate_size + TARGET_FP_XSTATE_MAGIC2_SIZE) {
+            if (!access_ok(env_cpu(env), VERIFY_READ, fxsave_addr,
+                           extended_size - TARGET_FPSTATE_FXSAVE_OFFSET)) {
+                return 1;
+            }
+            if (tswapl(*(uint32_t *) &fxsave->xfeatures[xfeatures_size]) == TARGET_FP_XSTATE_MAGIC2) {
+                cpu_x86_xrstor(env, fxsave_addr);
+                return 0;
+            }
+        }
+        /* fall through to fxrstor */
+    }
+
+    cpu_x86_fxrstor(env, fxsave_addr);
+    return 0;
+}
+
 static int
 restore_sigcontext(CPUX86State *env, struct target_sigcontext *sc)
 {
-    unsigned int err = 0;
+    int err = 1;
     abi_ulong fpstate_addr;
     unsigned int tmpflags;
 
@@ -513,20 +788,31 @@ restore_sigcontext(CPUX86State *env, struct target_sigcontext *sc)
 
     fpstate_addr = tswapl(sc->fpstate);
     if (fpstate_addr != 0) {
-        if (!access_ok(env_cpu(env), VERIFY_READ, fpstate_addr,
-                       sizeof(struct target_fpstate))) {
-            goto badframe;
+        struct target_fpstate *fpstate;
+        if (!lock_user_struct(VERIFY_READ, fpstate, fpstate_addr,
+                              sizeof(struct target_fpstate))) {
+            return err;
         }
 #ifndef TARGET_X86_64
-        cpu_x86_frstor(env, fpstate_addr, 1);
+        if (!(env->features[FEAT_1_EDX] & CPUID_FXSR)) {
+            cpu_x86_frstor(env, fpstate_addr, 1);
+            err = 0;
+        } else {
+            err = xrstor_sigcontext(env, &fpstate->fxsave,
+                                    fpstate_addr + TARGET_FPSTATE_FXSAVE_OFFSET);
+        }
 #else
-        cpu_x86_fxrstor(env, fpstate_addr);
+        err = xrstor_sigcontext(env, fpstate, fpstate_addr);
 #endif
+        unlock_user_struct(fpstate, fpstate_addr, 0);
+#ifdef CONFIG_LATX
+        load_xmm_from_env(env);
+#endif
+    } else {
+        err = 0;
     }
 
     return err;
-badframe:
-    return 1;
 }
 
 /* Note: there is no sigreturn on x86_64, there is only rt_sigreturn */
@@ -594,3 +880,19 @@ badframe:
     force_sig(TARGET_SIGSEGV);
     return -TARGET_QEMU_ESIGRETURN;
 }
+
+#ifndef TARGET_X86_64
+void setup_sigtramp(abi_ulong sigtramp_page)
+{
+    uint16_t *tramp = lock_user(VERIFY_WRITE, sigtramp_page, 2 * 8, 0);
+    assert(tramp != NULL);
+
+    default_sigreturn = sigtramp_page;
+    install_sigtramp(tramp);
+
+    default_rt_sigreturn = sigtramp_page + 8;
+    install_rt_sigtramp(tramp + 8);
+
+    unlock_user(tramp, sigtramp_page, 2 * 8);
+}
+#endif

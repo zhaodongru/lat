@@ -24,12 +24,67 @@
 #include "qemu.h"
 #include "trace.h"
 #include "signal-common.h"
+#include "hw/core/tcg-cpu-ops.h"
+#include "tcg/tcg.h"
+#include "fpu/softfloat.h"
+#ifdef CONFIG_LATX_AOT
+#include "aot.h"
+#endif
+#ifdef CONFIG_LATX
+#include "latx-signal.h"
+#include "reg-map.h"
+#include "latx-options.h"
+#include "loongarch-extcontext.h"
+#endif
+#include "exec/translate-all.h"
+#if defined(CONFIG_LATX_KZT) && defined(CONFIG_LATX_DEBUG)
+#include "debug.h"
+#endif
 
+static pthread_mutex_t sigact_mutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread int sigact_lock_count;
+static void sigact_lock(void)
+{
+    if (sigact_lock_count++ == 0) {
+        pthread_mutex_lock(&sigact_mutex);
+    }
+}
+
+static void sigact_unlock(void)
+{
+    if (--sigact_lock_count == 0) {
+        pthread_mutex_unlock(&sigact_mutex);
+    }
+}
+
+/* Grab lock to make sure things are in a consistent state after fork().  */
+void sigact_fork_start(void)
+{
+    if (sigact_lock_count)
+        abort();
+    pthread_mutex_lock(&sigact_mutex);
+}
+
+void sigact_fork_end(int child)
+{
+    if (child)
+        pthread_mutex_init(&sigact_mutex, NULL);
+    else
+        pthread_mutex_unlock(&sigact_mutex);
+}
+
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+static struct target_sigaction sigact_table[TARGET_NSIG + 1];
+#else
 static struct target_sigaction sigact_table[TARGET_NSIG];
+#endif
 
 static void host_signal_handler(int host_signum, siginfo_t *info,
                                 void *puc);
 
+/* Fallback addresses into sigtramp page. */
+abi_ulong default_sigreturn;
+abi_ulong default_rt_sigreturn;
 
 /*
  * System includes define _NSIG as SIGRTMAX + 1,
@@ -127,6 +182,20 @@ void host_to_target_sigset_internal(target_sigset_t *d,
     }
 }
 
+void target_sigpending(target_sigset_t *d)
+{
+    /* Assuming argument is correctly set before calling,
+     * we just append the emulated pending signals.
+     */
+    TaskState *ts = (TaskState *)thread_cpu->opaque;
+    int sig;
+    for (sig = 1; sig <= TARGET_NSIG; sig++) {
+        if (ts->sigtab[sig - 1].pending) {
+            target_sigaddset(d, sig);
+        }
+    }
+}
+
 void host_to_target_sigset(target_sigset_t *d, const sigset_t *s)
 {
     target_sigset_t d1;
@@ -193,6 +262,7 @@ int block_signals(void)
      * process_pending_signals().
      */
     sigfillset(&set);
+    sigdelset(&set, SIGSEGV);
     sigprocmask(SIG_SETMASK, &set, 0);
 
     return qatomic_xchg(&ts->signal_pending, 1);
@@ -558,7 +628,11 @@ void signal_init(void)
     sigfillset(&act.sa_mask);
     act.sa_flags = SA_SIGINFO;
     act.sa_sigaction = host_signal_handler;
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    for(i = 1; i <= TARGET_NSIG + 1; i++) {
+#else
     for(i = 1; i <= TARGET_NSIG; i++) {
+#endif
 #ifdef CONFIG_GPROF
         if (i == TARGET_SIGPROF) {
             continue;
@@ -568,6 +642,10 @@ void signal_init(void)
         sigaction(host_sig, NULL, &oact);
         if (oact.sa_sigaction == (void *)SIG_IGN) {
             sigact_table[i - 1]._sa_handler = TARGET_SIG_IGN;
+            /* Forked process may inherit SIG_IGN form parent, in this
+               case we should bypass the host_signal_handler. If a new
+               handler can be registered later by sigaction(). */
+            continue;
         } else if (oact.sa_sigaction == (void *)SIG_DFL) {
             sigact_table[i - 1]._sa_handler = TARGET_SIG_DFL;
         }
@@ -619,6 +697,20 @@ void force_sigsegv(int oldsig)
 #endif
 
 /* abort execution with signal */
+#if defined(CONFIG_LATX_DEBUG)
+const char *latx_demangling(char *symbol);
+static void latx_guest_backtrace(CPUArchState *env)
+{
+    int index = env->func_index;
+    printf("\n============ LATX Guest Backtrace ============\n");
+    for (int i = 0; i < FUNC_DEPTH; i++) {
+        fprintf(stderr, "#%2d  %s\n", i + 1,
+            latx_demangling(env->call_func[index % FUNC_DEPTH]));
+        index++;
+    }
+    latx_guest_stack_init(env);
+}
+#endif
 static void QEMU_NORETURN dump_core_and_abort(int target_sig)
 {
     CPUState *cpu = thread_cpu;
@@ -644,8 +736,14 @@ static void QEMU_NORETURN dump_core_and_abort(int target_sig)
         getrlimit(RLIMIT_CORE, &nodump);
         nodump.rlim_cur=0;
         setrlimit(RLIMIT_CORE, &nodump);
-        (void) fprintf(stderr, "qemu: uncaught target signal %d (%s) - %s\n",
+#ifdef CONFIG_LATX_DEBUG
+        (void) fprintf(stderr, "latx: uncaught target signal %d (%s) - %s\n",
             target_sig, strsignal(host_sig), "core dumped" );
+        latx_guest_backtrace(env);
+#if defined(CONFIG_LATX_KZT) && defined(CONFIG_LATX_DEBUG)
+        latx_kzt_debuginfo_check();
+#endif
+#endif
     }
 
     /* The proper exit code for dying from an uncaught signal is
@@ -698,6 +796,189 @@ static inline void rewind_if_in_safe_syscall(void *puc)
 }
 #endif
 
+extern long context_switch_native_to_bt_ret_0;
+#if defined(CONFIG_LATX_KZT)
+static char kzt_ret = 0xc3;
+#include "callback.h"
+#include "bridge_private.h"
+#include <execinfo.h>
+#endif
+
+static void Emulate_FTZ(ucontext_t *uc)
+{
+    uint32_t inst, rd, fd;
+    int opnd_type = 0;/*1:s  2:d*/
+    float_status status_force_soft;
+    memset(&status_force_soft, 0, sizeof(status_force_soft));
+    inst = *(uint32_t *)UC_PC(uc);
+    rd = inst & 0x1f;
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    /*
+     * In old world:
+     * WARNING: the offset of __fregs in uc->uc_mcontext is incorrent,
+     * we fix the issue by adding a extra offset, the solution is only
+     * temporary!
+     */
+    fd = rd + 1;
+    #define OPND_D_32 UC_FREG(uc)[(inst & 0x1f) + 1].__val32[0]
+    #define OPND_J_32 UC_FREG(uc)[((inst >> 5) & 0x1f ) + 1].__val32[0]
+    #define OPND_K_32 UC_FREG(uc)[((inst >> 10) & 0x1f) + 1].__val32[0]
+    #define OPND_A_32 UC_FREG(uc)[((inst >> 15) & 0x1f) + 1].__val32[0]
+    #define OPND_D_64 UC_FREG(uc)[(inst & 0x1f) + 1].__val64[0]
+    #define OPND_J_64 UC_FREG(uc)[((inst >> 5) & 0x1f) + 1].__val64[0]
+    #define OPND_K_64 UC_FREG(uc)[((inst >> 10) & 0x1f) + 1].__val64[0]
+    #define OPND_A_64 UC_FREG(uc)[((inst >> 15) & 0x1f) + 1].__val64[0]
+
+    #define OPND_D_32_SET(val) (OPND_D_32 = val)
+    #define OPND_J_32_SET(val) (OPND_J_32 = val)
+    #define OPND_K_32_SET(val) (OPND_K_32 = val)
+    #define OPND_A_32_SET(val) (OPND_A_32 = val)
+    #define OPND_D_64_SET(val) (OPND_D_64 = val)
+    #define OPND_J_64_SET(val) (OPND_J_64 = val)
+    #define OPND_K_64_SET(val) (OPND_K_64 = val)
+    #define OPND_A_64_SET(val) (OPND_A_64 = val)
+#else
+    fd = rd;
+    struct extctx_layout extctx;
+    memset(&extctx, 0, sizeof(extctx));
+    /* we need to parse the extcontext data */
+    parse_extcontext(uc, &extctx);
+    #define OPND_D_32 UC_GET_FPR(&extctx, (inst & 0x1f), int32_t)
+    #define OPND_J_32 UC_GET_FPR(&extctx, (inst & (0x1f << 5)), int32_t)
+    #define OPND_K_32 UC_GET_FPR(&extctx, (inst & (0x1f << 10)), int32_t)
+    #define OPND_A_32 UC_GET_FPR(&extctx, (inst & (0x1f << 15)), int32_t)
+    #define OPND_D_64 UC_GET_FPR(&extctx, (inst & 0x1f), int64_t)
+    #define OPND_J_64 UC_GET_FPR(&extctx, (inst & (0x1f << 5)), int64_t)
+    #define OPND_K_64 UC_GET_FPR(&extctx, (inst & (0x1f << 10)), int64_t)
+    #define OPND_A_64 UC_GET_FPR(&extctx, (inst & (0x1f << 15)), int64_t)
+
+    #define OPND_D_32_SET(val) UC_SET_FPR(&extctx, (inst & 0x1f), val, int32_t)
+    #define OPND_J_32_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 5)), val, int32_t)
+    #define OPND_K_32_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 10)), val, int32_t)
+    #define OPND_A_32_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 15)), val, int32_t)
+    #define OPND_D_64_SET(val) UC_SET_FPR(&extctx, (inst & 0x1f), val, int64_t)
+    #define OPND_J_64_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 5)), val, int64_t)
+    #define OPND_K_64_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 10)), val, int64_t)
+    #define OPND_A_64_SET(val) UC_SET_FPR(&extctx, (inst & (0x1f << 15)), val, int64_t)
+    /* TODO */
+#endif
+
+    switch(inst & ~0x7fff){
+        case 0x01008000:/*FADD_S*/
+            OPND_D_32_SET(float32_add(OPND_J_32, OPND_K_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01028000:/*FSUB_S*/
+            OPND_D_32_SET(float32_sub(OPND_J_32, OPND_K_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01048000:/*FMUL_S*/
+            OPND_D_32_SET(float32_mul(OPND_J_32, OPND_K_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01068000:/*FDIV_S*/
+            OPND_D_32_SET(float32_div(OPND_J_32, OPND_K_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01108000:/*FSCALEB_S*/
+            OPND_D_32_SET(float32_to_int32(OPND_K_32, &status_force_soft));
+            OPND_D_32_SET(float32_scalbn(OPND_J_32, OPND_D_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01010000:/*FADD_D*/
+            OPND_D_64_SET(float64_add(OPND_J_64, OPND_K_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x01030000:/*FSUB_D*/
+            OPND_D_64_SET(float64_sub(OPND_J_64, OPND_K_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x01050000:/*FMUL_D*/
+            OPND_D_64_SET(float64_mul(OPND_J_64, OPND_K_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x01070000:/*FDIV_D*/
+            OPND_D_64_SET(float64_div(OPND_J_64, OPND_K_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x01110000:/*FSCALEB_D*/
+            OPND_D_64_SET(float64_to_int64(OPND_K_64, &status_force_soft));
+            OPND_D_64_SET(float64_scalbn(OPND_J_64, OPND_D_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        default:
+            break;
+    }
+    switch(inst & ~0xfffff){
+        case 0x08100000:/*FMADD_S*/
+            OPND_D_32_SET(float32_muladd(OPND_J_32, OPND_K_32, OPND_A_32, 0, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x08500000:/*FMSUB_S*/
+            OPND_D_32_SET(float32_muladd(OPND_J_32, OPND_K_32, OPND_A_32, float_muladd_negate_c, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x08900000:/*FNMADD_S*/
+            OPND_D_32_SET(float32_muladd(OPND_J_32, OPND_K_32, OPND_A_32, float_muladd_negate_result, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x08d00000:/*FNMSUB_S*/
+            OPND_D_32_SET(float32_muladd(OPND_J_32, OPND_K_32, OPND_A_32, float_muladd_negate_c | float_muladd_negate_result, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x08200000:/*FMADD_D*/
+            OPND_D_64_SET(float64_muladd(OPND_J_64, OPND_K_64, OPND_A_64, 0, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x08600000:/*FMSUB_D*/
+            OPND_D_64_SET(float64_muladd(OPND_J_64, OPND_K_64, OPND_A_64, float_muladd_negate_c, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x08a00000:/*FNMADD_D*/
+            OPND_D_64_SET(float64_muladd(OPND_J_64, OPND_K_64, OPND_A_64, float_muladd_negate_result, &status_force_soft));
+            opnd_type = 2;
+            break;
+        case 0x08e00000:/*FNMSUB_D*/
+            OPND_D_64_SET(float64_muladd(OPND_J_64, OPND_K_64, OPND_A_64, float_muladd_negate_c | float_muladd_negate_result, &status_force_soft));
+            opnd_type = 2;
+            break;
+        default:
+            break;
+    }
+    switch(inst & ~0x3ff){
+        case 0x01142400:/*FLOGB_S*/
+            OPND_D_32_SET(float32_log2(OPND_J_32, &status_force_soft));
+            opnd_type = 1;
+            break;
+        case 0x01142800:/*FLOGB_D*/
+            OPND_D_64_SET(float64_log2(OPND_J_64, &status_force_soft));
+            opnd_type = 2;
+            break;
+        default:
+            break;
+    }
+
+    assert(opnd_type != 0);
+
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    if(opnd_type & 0x2) {
+        UC_FREG(uc)[fd].__val64[0] &= 1UL << 63;
+	} else {
+        UC_FREG(uc)[fd].__val32[0] &= 1 << 31;
+	}
+    /* clear cause bits prevent kernel to raise another SIGFPE */
+    UC_FCSR(uc) &= ~(0x1 << 25);
+#else
+    if(opnd_type & 0x2) {
+	    UC_SET_FPR(&extctx, fd, (UC_GET_FPR(&extctx, fd, int64_t) & 1UL << 63), int64_t);
+	} else {
+	    UC_SET_FPR(&extctx, fd, (UC_GET_FPR(&extctx, fd, int32_t) & 1UL << 31), int32_t);
+	}
+	UC_SET_FCSR(&extctx, (UC_GET_FCSR(&extctx, int32_t)) & (~(0x1 << 25)), int32_t);
+#endif
+    UC_PC(uc) += 4;
+}
+
 static void host_signal_handler(int host_signum, siginfo_t *info,
                                 void *puc)
 {
@@ -710,6 +991,89 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
     ucontext_t *uc = puc;
     struct emulated_sigtable *k;
 
+    if (host_signum == SIGSEGV) {
+        if ((*(unsigned int *)UC_PC(uc) == WRITE_ILL_INST) || (*(unsigned int *)UC_PC(uc) == READ_ILL_INST)) {
+            env->puc = uc;
+            uint64_t real_si_addr = env->cr[2];
+            int flag = page_get_flags(real_si_addr);
+            if (flag & PAGE_VALID) {
+                info->si_code = SEGV_ACCERR;
+            } else {
+                info->si_code = SEGV_MAPERR;
+            }
+
+            int aim_flag;
+            if (*(unsigned int *)UC_PC(uc) == WRITE_ILL_INST) {
+                aim_flag = PAGE_WRITE | PAGE_WRITE_ORG;
+            } else {
+                aim_flag = PAGE_READ;
+            }
+
+            if (flag & aim_flag) {
+                UC_PC(uc) += 4;
+                return;
+            }
+            info->si_addr = (void *)real_si_addr;
+        }
+    }
+
+    /* workaround: Clear FCSR.Cause */
+    if (host_signum == SIGFPE) {
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+        UC_FCSR(uc) &= ~0x1f000000;
+#endif
+    }
+
+#ifdef CONFIG_LATX_JRRA
+    if (option_jr_ra && host_signum == SIGILL &&
+        *(unsigned int *)UC_PC(uc) == SMC_ILL_INST) {
+        TranslationBlock *current_tb = tcg_tb_lookup(UC_PC(uc));
+        if (current_tb) {
+            /* clear scr0 */
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+            UC_FREG(uc)[0].__val64[0] = 0;
+#else
+	    struct extctx_layout extctx;
+	    memset(&extctx, 0, sizeof(extctx));
+	    parse_extcontext(uc, &extctx);
+	    UC_LBT(&extctx)->regs[0] = 0;
+#endif
+            /* set the next TB and point the epc to the epilogue */
+            UC_GR(uc)[reg_statics_map[S_UD1]] = current_tb->pc;
+            UC_PC(uc) = context_switch_native_to_bt_ret_0;
+        }
+        return;
+    }
+#endif
+#ifdef CONFIG_LATX
+    /*
+     * store ucontext_t to env for context switch.
+     */
+    env->puc = uc;
+#endif
+
+    /* #define LA_HOOK_PTRACE SIGSEGV */
+    if (host_signum == LA_HOOK_PTRACE && info->si_code == SI_QUEUE) {
+        void *trace_page = info->si_value.sival_ptr;
+        if (trace_page == (void *)-1) {
+            tb_flush(cpu);
+#ifdef CONFIG_PTRACE_DEBUG
+            fprintf(stderr, "[PTRACE_DEBUG] tracee flush all TBs\n");
+#endif
+        } else if (trace_page) {
+            mmap_lock();
+            tb_invalidate_phys_page((unsigned long)trace_page);
+            mmap_unlock();
+#ifdef CONFIG_PTRACE_DEBUG
+            fprintf(stderr, "[PTRACE_DEBUG] tracee flush page %p\n", trace_page);
+        } else {
+            fprintf(stderr, "[PTRACE_DEBUG] recv sig, page error!\n");
+#endif
+        }
+        return;
+    }
+
+
     /* the CPU emulator uses some host signals to detect exceptions,
        we forward to it some signals */
     if ((host_signum == SIGSEGV || host_signum == SIGBUS)
@@ -718,10 +1082,62 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
             return;
     }
 
+
+    /*
+     * Emulate FTZ by underflow exception, as the SDM says:
+     * When the underflow exception is masked and the flush-to-zero mode is enabled,
+     * the processor performs the following operations when it detects a floating-point
+     * underflow condition:
+     * 1. Returns a zero result with the sign of the true result.
+     * 2. Sets the precision and underflow exception flags.
+     *
+     * If the underflow exception is not masked, the flush-to-zero bit is ignored.
+     */
+    /*
+     intel manual 10.2.3.3 : If the underflow exception is not masked, the flush-to-zero bit is ignored.
+     */
+    if (host_signum == SIGFPE && info->si_code == FPE_FLTUND &&
+        env->sse_status.flush_to_zero && !(~(env->mxcsr) & 0x800)) {
+        Emulate_FTZ(uc);
+        return;
+    }
+
+
     /* get target signal number */
     sig = host_to_target_signal(host_signum);
     if (sig < 1 || sig > TARGET_NSIG)
         return;
+
+    /*
+     * When got siganl SIGFPE, we should exit loop and restore
+     * state at the exception pc (Just like SIGSEGV does)
+     */
+
+    unsigned long address = (unsigned long)info->si_addr;
+    CPUClass *cc;
+    greg_t pc = UC_PC(uc);
+    if (host_signum == SIGFPE && tcg_tb_lookup(pc)) {
+        pc += GETPC_ADJ;
+        cc = CPU_GET_CLASS(cpu);
+        cc->tcg_ops->tlb_fill(cpu, address, 0, MMU_DATA_LOAD,
+                              MMU_USER_IDX, false, pc, info);
+        g_assert_not_reached();
+    } else if (host_signum == SIGTRAP && tcg_tb_lookup(pc)) {
+        /* next instruction */
+        pc += GETPC_ADJ + 4;
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+        sigset_t *puc_sigmask= (sigset_t *)((void *)&uc->uc_mcontext+0x1540);
+        sigprocmask(SIG_SETMASK, puc_sigmask, NULL);
+#else
+        sigprocmask(SIG_SETMASK, &((ucontext_t *)puc)->uc_sigmask, NULL);
+#endif
+        clear_helper_retaddr();
+        cc = CPU_GET_CLASS(cpu);
+        cc->tcg_ops->tlb_fill(cpu, address, 0, MMU_INST_FETCH,
+                          MMU_USER_IDX, false, pc, info);
+        g_assert_not_reached();
+    }
+
     trace_user_host_signal(env, host_signum, sig);
 
     rewind_if_in_safe_syscall(puc);
@@ -746,12 +1162,42 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
      * We can't use sizeof(uc->uc_sigmask) either, because the libc
      * headers define the struct field with the wrong (too large) type.
      */
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    /* TODO:workaround of user/kernel uapi mismatch */
+    sigset_t *puc_sigmask = (sigset_t *)((void *)&uc->uc_mcontext+0x1540);
+    memset(puc_sigmask, 0xff, SIGSET_T_SIZE);
+    sigdelset(puc_sigmask, SIGSEGV);
+    sigdelset(puc_sigmask, SIGBUS);
+#else
     memset(&uc->uc_sigmask, 0xff, SIGSET_T_SIZE);
     sigdelset(&uc->uc_sigmask, SIGSEGV);
     sigdelset(&uc->uc_sigmask, SIGBUS);
+#endif
 
     /* interrupt the virtual CPU as soon as possible */
+#ifdef CONFIG_LATX
+    tb_exit_to_qemu(env, uc);
+#endif
     cpu_exit(thread_cpu);
+#if defined(CONFIG_LATX_KZT)
+#define SIGCANCEL       __SIGRTMIN
+    if (host_signum == SIGCANCEL + 2 && option_kzt && pc > reserved_va) {
+        #define BTSIZT 64
+        void    * array[BTSIZT] = {0};
+        size_t  size;
+        size = backtrace(array, BTSIZT);
+        if (size <= BTSIZT && size > 1 && array[size -1]) {
+            TranslationBlock *kzt_tb = tcg_tb_lookup((uintptr_t)array[size -1]);
+            if (kzt_tb) {
+                onebridge_t *bridge = (onebridge_t *)kzt_tb->pc;
+                if (bridge->CC == 0xCC && bridge->S == 'S' && bridge->C == 'C') {
+                    RunFunctionWithState((uintptr_t)&kzt_ret, 0);
+                }
+            }
+        }
+
+    }
+#endif
 }
 
 /* do_sigaltstack() returns target values and errnos. */
@@ -839,7 +1285,11 @@ int do_sigaction(int sig, const struct target_sigaction *act,
 
     trace_signal_do_sigaction_guest(sig, TARGET_NSIG);
 
-    if (sig < 1 || sig > TARGET_NSIG || sig == TARGET_SIGKILL || sig == TARGET_SIGSTOP) {
+    if (sig < 1 || sig > TARGET_NSIG) {
+        return -TARGET_EINVAL;
+    }
+
+    if (act && (sig == TARGET_SIGKILL || sig == TARGET_SIGSTOP)) {
         return -TARGET_EINVAL;
     }
 
@@ -847,6 +1297,7 @@ int do_sigaction(int sig, const struct target_sigaction *act,
         return -TARGET_ERESTARTSYS;
     }
 
+    sigact_lock();
     k = &sigact_table[sig - 1];
     if (oact) {
         __put_user(k->_sa_handler, &oact->_sa_handler);
@@ -884,13 +1335,19 @@ int do_sigaction(int sig, const struct target_sigaction *act,
              *   See https://github.com/golang/go/issues/33746
              * So we silently ignore the error.
              */
+            sigact_unlock();
             return 0;
         }
         if (host_sig != SIGSEGV && host_sig != SIGBUS) {
             sigfillset(&act1.sa_mask);
             act1.sa_flags = SA_SIGINFO;
+            if (k->sa_flags & TARGET_SA_NOCLDSTOP)
+                act1.sa_flags |= SA_NOCLDSTOP;
             if (k->sa_flags & TARGET_SA_RESTART)
                 act1.sa_flags |= SA_RESTART;
+            if (k->sa_flags & TARGET_SA_NOCLDWAIT)
+                act1.sa_flags |= SA_NOCLDWAIT;
+
             /* NOTE: it is important to update the host kernel signal
                ignore state to avoid getting unexpected interrupted
                syscalls */
@@ -907,6 +1364,7 @@ int do_sigaction(int sig, const struct target_sigaction *act,
             ret = sigaction(host_sig, &act1, NULL);
         }
     }
+    sigact_unlock();
     return ret;
 }
 
@@ -945,6 +1403,11 @@ static void handle_pending_signal(CPUArchState *cpu_env, int sig,
                    sig != TARGET_SIGURG &&
                    sig != TARGET_SIGWINCH &&
                    sig != TARGET_SIGCONT) {
+#ifdef CONFIG_LATX_AOT
+        if (sig == TARGET_SIGTERM) {
+            aot_exit_entry(cpu, true);
+        }
+#endif
             dump_core_and_abort(sig);
         }
     } else if (handler == TARGET_SIG_IGN) {
@@ -1004,6 +1467,7 @@ void process_pending_signals(CPUArchState *cpu_env)
     sigset_t set;
     sigset_t *blocked_set;
 
+    sigact_lock();
     while (qatomic_read(&ts->signal_pending)) {
         /* FIXME: This is not threadsafe.  */
         sigfillset(&set);
@@ -1056,4 +1520,6 @@ void process_pending_signals(CPUArchState *cpu_env)
         sigprocmask(SIG_SETMASK, &set, 0);
     }
     ts->in_sigsuspend = 0;
+
+    sigact_unlock();
 }

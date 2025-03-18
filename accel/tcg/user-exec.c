@@ -28,6 +28,18 @@
 #include "qemu/atomic128.h"
 #include "trace/trace-root.h"
 #include "trace/mem.h"
+#include <dlfcn.h>
+
+#ifdef CONFIG_LATX
+#include "qemu.h"
+#include "latx-backtrace.h"
+#endif
+#ifdef CONFIG_LATX_DEBUG
+#include "latx-debug.h"
+#if defined(CONFIG_LATX_KZT)
+#include "debug.h"
+#endif
+#endif
 
 #undef EAX
 #undef ECX
@@ -57,6 +69,131 @@ static void QEMU_NORETURN cpu_exit_tb_from_sighandler(CPUState *cpu,
     cpu_loop_exit_noexc(cpu);
 }
 
+#if defined(CONFIG_LATX_DEBUG)
+const char *latx_demangling(char *symbol);
+static void latx_guest_backtrace(CPUArchState *env)
+{
+    int index = env->func_index;
+    printf("\n============ LATX Guest Backtrace ============\n");
+    for (int i = 0; i < FUNC_DEPTH; i++) {
+        fprintf(stderr, "#%2d  %s\n", i + 1,
+            latx_demangling(env->call_func[index % FUNC_DEPTH]));
+        index++;
+    }
+    latx_guest_stack_init(env);
+}
+
+static void show_sig_host_regs(ucontext_t *uc)
+{
+    fprintf(stderr, "================= GPR INFO ===================\n");
+    fprintf(stderr, "r0   0x%016llx  r1   0x%016llx  r2   0x%016llx  r3   0x%016llx\n",
+            UC_GR(uc)[0], UC_GR(uc)[1],
+            UC_GR(uc)[2], UC_GR(uc)[3]);
+    fprintf(stderr, "r4   0x%016llx  r5   0x%016llx  r6   0x%016llx  r7   0x%016llx\n",
+            UC_GR(uc)[4], UC_GR(uc)[5],
+            UC_GR(uc)[6], UC_GR(uc)[7]);
+    fprintf(stderr, "r8   0x%016llx  r9   0x%016llx  r10  0x%016llx  r11  0x%016llx\n",
+            UC_GR(uc)[8], UC_GR(uc)[9],
+            UC_GR(uc)[10], UC_GR(uc)[11]);
+    fprintf(stderr, "r12  0x%016llx  r13  0x%016llx  r14  0x%016llx  r15  0x%016llx\n",
+            UC_GR(uc)[12], UC_GR(uc)[13],
+            UC_GR(uc)[14], UC_GR(uc)[15]);
+    fprintf(stderr, "r16  0x%016llx  r17  0x%016llx  r18  0x%016llx  r19  0x%016llx\n",
+            UC_GR(uc)[16], UC_GR(uc)[17],
+            UC_GR(uc)[18], UC_GR(uc)[19]);
+    fprintf(stderr, "r20  0x%016llx  r21  0x%016llx  r22  0x%016llx  r23  0x%016llx\n",
+            UC_GR(uc)[20], UC_GR(uc)[21],
+            UC_GR(uc)[22], UC_GR(uc)[23]);
+    fprintf(stderr, "r24  0x%016llx  r25  0x%016llx  r26  0x%016llx  r27  0x%016llx\n",
+            UC_GR(uc)[24], UC_GR(uc)[25],
+            UC_GR(uc)[26], UC_GR(uc)[27]);
+    fprintf(stderr, "r28  0x%016llx  r29  0x%016llx  r30  0x%016llx  r31  0x%016llx\n",
+            UC_GR(uc)[28], UC_GR(uc)[29],
+            UC_GR(uc)[30], UC_GR(uc)[31]);
+}
+
+static void show_sig_x86_eflags(ucontext_t *uc)
+{
+    fprintf(stderr, "=================== EFLAGS ===================\n");
+    unsigned int eflags;
+#if defined(__loongarch__)
+    __asm__ __volatile__ (
+            "    .word 0x17 << 18 | 0x3f << 10 | 0 << 5 | 0xc\n"
+            "    or %[eflags], $zero, $t0\n"
+            : [eflags] "=&r" (eflags)
+            : );
+#elif defined(__mips__)
+    __asm__ __volatile__ (
+            "    .word ((0x70004034) | (0xc) << 16) | (0x3f) << 6\n"
+            "    or %[eflags], $zero, $t0\n"
+            : [eflags] "=&r" (eflags)
+            : );
+#endif
+    fprintf(stderr, "[ ");
+    if (eflags & 0x1) {
+        fprintf(stderr, "CF ");
+    }
+    if (eflags & 0x4) {
+        fprintf(stderr, "PF ");
+    }
+    if (eflags & 0x10) {
+        fprintf(stderr, "AF ");
+    }
+    if (eflags & 0x40) {
+        fprintf(stderr, "ZF ");
+    }
+    if (eflags & 0x80) {
+        fprintf(stderr, "SF ");
+    }
+    if (eflags & 0x800) {
+        fprintf(stderr, "OF ");
+    }
+    fprintf(stderr, "]\n");
+}
+
+static void show_latx_signal_debuginfo(siginfo_t *info, uintptr_t pc,
+                                       ucontext_t *uc)
+{
+    X86CPU *cpu = X86_CPU(current_cpu);
+    CPUX86State *env = &cpu->env;
+
+    latx_guest_backtrace(env);
+    fprintf(stderr, "\n================= SIG INFO ===================\n");
+    fprintf(stderr, "pid%d cpu%d signo %d si_code %d si_errno %d si_addr %p epc 0x%lx\n",
+            getpid(), current_cpu->cpu_index, info->si_signo, info->si_code,
+            info->si_errno, info->si_addr, pc);
+    TranslationBlock *current_tb = tcg_tb_lookup(pc);
+    if ((current_tb != NULL) && (info->si_addr != (void *)0xde)) {
+        int count =  current_tb->tc.size / 4;
+        unsigned int *ins_p = (unsigned int *)current_tb->tc.ptr;
+        fprintf(stderr, "================ CURRENT TB ==================\n");
+        fprintf(stderr, "This cpu%d tb_exec_count = %ld\n",
+                current_cpu->cpu_index, env->tb_exec_count);
+        fprintf(stderr, "current_tb start pc = 0x" TARGET_FMT_lx "\n", current_tb->pc);
+        for (int i = 0; i < count; i++) {
+            if ((unsigned long)(ins_p + i) == pc) {
+                fprintf(stderr, " epc => ");
+            } else {
+                fprintf(stderr, "\t");
+            }
+            fprintf(stderr, "%p:\t0x%x\n", ins_p + i, *(ins_p + i));
+        }
+    }
+    show_sig_host_regs(uc);
+    show_sig_x86_eflags(uc);
+    if (info->si_addr == (void *)0x1) {
+        abort();
+    }
+    fprintf(stderr, "============== LATX TRACE MEM ================\n");
+    fprintf(stderr, "Last store latx_trace_mem insn 0x%016lx\n", env->last_store_insn);
+    fprintf(stderr, "============ LATX HOST BACKTRACE =============\n");
+    print_stack_trace();
+#if defined(CONFIG_LATX_KZT) && defined(CONFIG_LATX_DEBUG)
+    latx_kzt_debuginfo_check();
+#endif
+}
+#endif
+
 /* 'pc' is the host PC at which the exception was raised. 'address' is
    the effective address of the memory exception. 'is_write' is 1 if a
    write caused the exception and otherwise 0'. 'old_set' is the
@@ -69,6 +206,15 @@ static inline int handle_cpu_signal(uintptr_t pc, siginfo_t *info,
     unsigned long address = (unsigned long)info->si_addr;
     MMUAccessType access_type = is_write ? MMU_DATA_STORE : MMU_DATA_LOAD;
 
+#if defined(CONFIG_LATX_DEBUG)
+    uintptr_t epc = pc;
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    mcontext_t * uc_mctx = (void *)old_set - 0x1540;
+    ucontext_t *uc = container_of(uc_mctx, ucontext_t, uc_mcontext);
+#else
+    ucontext_t *uc = container_of(old_set, ucontext_t, uc_sigmask);
+#endif
+#endif
     switch (helper_retaddr) {
     default:
         /*
@@ -119,19 +265,6 @@ static inline int handle_cpu_signal(uintptr_t pc, siginfo_t *info,
         break;
     }
 
-    /* For synchronous signals we expect to be coming from the vCPU
-     * thread (so current_cpu should be valid) and either from running
-     * code or during translation which can fault as we cross pages.
-     *
-     * If neither is true then something has gone wrong and we should
-     * abort rather than try and restart the vCPU execution.
-     */
-    if (!cpu || !cpu->running) {
-        printf("qemu:%s received signal outside vCPU context @ pc=0x%"
-               PRIxPTR "\n",  __func__, pc);
-        abort();
-    }
-
 #if defined(DEBUG_SIGNAL)
     printf("qemu: SIGSEGV pc=0x%08lx address=%08lx w=%d oldset=0x%08lx\n",
            pc, address, is_write, *(unsigned long *)old_set);
@@ -175,6 +308,25 @@ static inline int handle_cpu_signal(uintptr_t pc, siginfo_t *info,
         }
     }
 
+#if defined(CONFIG_LATX_DEBUG)
+    show_latx_signal_debuginfo(info, epc, uc);
+#endif
+
+    /* For synchronous signals we expect to be coming from the vCPU
+     * thread (so current_cpu should be valid) and either from running
+     * code or during translation which can fault as we cross pages.
+     *
+     * If neither is true then something has gone wrong and we should
+     * abort rather than try and restart the vCPU execution.
+     */
+    if (!cpu || !cpu->running) {
+#if defined(CONFIG_LATX_DEBUG)
+        printf("qemu:%s received signal outside vCPU context @ pc=0x%"
+               PRIxPTR "\n",  __func__, pc);
+#endif
+        abort();
+    }
+
     /* Convert forcefully to guest address space, invalid addresses
        are still valid segv ones */
     address = h2g_nocheck(address);
@@ -188,7 +340,7 @@ static inline int handle_cpu_signal(uintptr_t pc, siginfo_t *info,
 
     cc = CPU_GET_CLASS(cpu);
     cc->tcg_ops->tlb_fill(cpu, address, 0, access_type,
-                          MMU_USER_IDX, false, pc);
+                          MMU_USER_IDX, false, pc, info);
     g_assert_not_reached();
 }
 
@@ -213,14 +365,14 @@ static int probe_access_internal(CPUArchState *env, target_ulong addr,
     }
 
     if (!guest_addr_valid_untagged(addr) ||
-        page_check_range(addr, 1, flags) < 0) {
+        !page_check_range(addr, 1, flags)) {
         if (nonfault) {
             return TLB_INVALID_MASK;
         } else {
             CPUState *cpu = env_cpu(env);
             CPUClass *cc = CPU_GET_CLASS(cpu);
             cc->tcg_ops->tlb_fill(cpu, addr, fault_size, access_type,
-                                  MMU_USER_IDX, false, ra);
+                                  MMU_USER_IDX, false, ra, NULL);
             g_assert_not_reached();
         }
     }
@@ -248,6 +400,15 @@ void *probe_access(CPUArchState *env, target_ulong addr, int size,
     g_assert(flags == 0);
 
     return size ? g2h(env_cpu(env), addr) : NULL;
+}
+
+tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
+                                        void **hostp)
+{
+    if (hostp) {
+        *hostp = g2h_untagged(addr);
+    }
+    return addr;
 }
 
 #if defined(__i386__)
@@ -718,6 +879,19 @@ int cpu_signal_handler(int host_signum, void *pinfo,
     uint32_t insn = *(uint32_t *)pc;
     int is_write = 0;
 
+#ifndef CONFIG_SOFTMMU
+    mmap_lock();
+    if (page_get_target_data((uint64_t)info->si_addr) &&
+        info->si_signo == SIGSEGV) {
+        int ret = shared_private_interpret(info, uc);
+        if (!ret) {
+            mmap_unlock();
+            return 1;
+        }
+    }
+    mmap_unlock();
+#endif
+
     /* Detect all store instructions at program counter. */
     switch((insn >> 26) & 077) {
     case 050: /* SB */
@@ -751,6 +925,166 @@ int cpu_signal_handler(int host_signum, void *pinfo,
     }
 
     return handle_cpu_signal(pc, info, is_write, &uc->uc_sigmask);
+}
+
+#elif defined(__loongarch__)
+#if defined(CONFIG_LATX_KZT)
+#include "debug.h"
+static int find_stack_func_exist(int func, int index)
+{
+#include <execinfo.h>
+#define BTSIZT 64
+    void    * array[BTSIZT] = {0};
+    size_t  size;
+    int ret = -1;
+
+    size = backtrace(array, BTSIZT);
+    if (size < index) {
+        return -1;
+    }
+    Dl_info dl_info;
+    if (dladdr (array[index], &dl_info) && dl_info.dli_sname &&  *(int *)dl_info.dli_sname == func) {
+        ret = 0;
+        printf_log(LOG_NEVER, "%s find func %x\n", __func__, func);
+        goto out;
+    }
+out:
+    return ret;
+}
+
+static int elf_native_func[] = {0x6f6c6552/*"Relo"*/};
+#endif
+int cpu_signal_handler(int host_signum, void *pinfo,
+                       void *puc)
+{
+    siginfo_t *info = pinfo;
+    ucontext_t *uc = puc;
+    greg_t pc = uc->uc_mcontext.__pc;
+    uint32_t insn = *(uint32_t *)pc;
+
+#ifndef CONFIG_SOFTMMU
+    if (info->si_signo == SIGSEGV &&
+        info->si_code == SEGV_MAPERR &&
+        (tcg_tb_lookup(pc) || !current_cpu->running)) {
+        int prot = page_get_flags((target_ulong)(uint64_t)info->si_addr);
+        if (prot & PAGE_BITS) {
+            cpu_relax();
+            return 1;
+        }
+    }
+
+    mmap_lock();
+
+    if (page_get_target_data((uint64_t)info->si_addr) &&
+        info->si_signo == SIGSEGV) {
+        int ret = shared_private_interpret(info, uc);
+        if (!ret) {
+            mmap_unlock();
+            return 1;
+        }
+    }
+    if (info->si_signo == SIGBUS) {
+        int ret = lock_interpret(info, uc);
+        if (!ret) {
+            mmap_unlock();
+            return 1;
+        }
+    }
+#if defined(CONFIG_LATX_KZT)
+    if (option_kzt && (int64_t)info->si_addr >= info1.start_data &&
+        (int64_t)info->si_addr <= info1.end_data &&
+        info->si_signo == SIGSEGV) {
+        int ret = elf_data_interpret(info, uc);
+        if (!ret) {
+            mmap_unlock();
+            return 1;
+        }
+    }
+    if (option_kzt && info->si_signo == SIGSEGV) {
+        for (int i = 0; i < sizeof(elf_native_func) / sizeof(int); i++) {
+            if (!find_stack_func_exist(elf_native_func[i], 4)) {
+                int ret = elf_data_interpret(info, uc);
+                if (!ret) {
+                    mmap_unlock();
+                    return 1;
+                }
+            }
+        }
+    }
+#endif
+    mmap_unlock();
+#endif
+
+    int is_write = 0;
+    //TODO use kernel to send write info
+    //only st/stl/str handled, may cause bugs
+
+    switch (insn >> 24) {
+    case 0x21: /* SC.W */
+    case 0x23: /* SC.D */
+    case 0x25: /* STPTR.W */
+    case 0x27: /* STPTR.D */
+    case 0x29: /* ST.{B/H/W/D} */
+    case 0x2f: /* STL.{W/D} STR.{W/D} */
+        is_write = 1;
+        goto insn_parse_end;
+    default:
+        break;
+    }
+
+    switch (insn >> 22) {
+    case 0xad: /* FST.S */
+    case 0xaf: /* FST.D */
+    case 0xb1: /* VST */
+    case 0xb3: /* XVST */
+        is_write = 1;
+        goto insn_parse_end;
+    default:
+        break;
+    }
+
+    switch (insn >> 18) {
+    case 0xe04: /* STX.B */
+    case 0xe05: /* STX.H */
+    case 0xe06: /* STX.W */
+    case 0xe07: /* STX.D */
+    case 0xe0e: /* FSTX.S */
+    case 0xe0f: /* FSTX.D */
+    case 0xe11: /* VSTX */
+    case 0xe13: /* XVSTX */
+        is_write = 1;
+        goto insn_parse_end;
+    default:
+        break;
+    }
+
+    switch (insn >> 15) {
+    case 0x70c0 ... 0x70e3: /* AM* */
+        is_write = 1;
+        break;
+    }
+insn_parse_end:
+
+#ifdef CONFIG_LATX_DEBUG
+    {
+    if (option_debug_lative && (info->si_addr == (void *)0xde)) {
+        show_sig_host_regs(uc);
+        show_sig_x86_eflags(uc);
+        uc->uc_mcontext.__pc += 4;
+        return 1;
+    }
+    }
+#endif
+
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
+    /* TODO:workaround of user/kernel uapi mismatch */
+    {
+    sigset_t *puc_sigmask = (sigset_t *)((void *)&uc->uc_mcontext+0x1540);
+    return handle_cpu_signal(pc, info, is_write, puc_sigmask);
+    }
+#else
+    return handle_cpu_signal(pc, info, is_write, &uc->uc_sigmask);
+#endif
 }
 
 #elif defined(__riscv)

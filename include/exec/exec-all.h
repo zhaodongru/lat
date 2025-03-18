@@ -21,11 +21,15 @@
 #define EXEC_ALL_H
 
 #include "cpu.h"
+#ifdef CONFIG_LATX
+#include "optimize-config.h"
+#endif
 #include "exec/tb-context.h"
 #ifdef CONFIG_TCG
 #include "exec/cpu_ldst.h"
 #endif
 #include "sysemu/cpu-timers.h"
+#include "qemu/interval-tree.h"
 
 /* allow to see translation results - the slowdown should be negligible, so we leave it */
 #define DEBUG_DISAS
@@ -43,9 +47,10 @@ typedef ram_addr_t tb_page_addr_t;
 
 #include "qemu/log.h"
 
-void gen_intermediate_code(CPUState *cpu, TranslationBlock *tb, int max_insns);
+void tb_reset_jump(TranslationBlock *tb, int n);
 void restore_state_to_opc(CPUArchState *env, TranslationBlock *tb,
                           target_ulong *data);
+int encode_search(TranslationBlock *tb, uint8_t *block);
 
 /**
  * cpu_restore_state:
@@ -442,6 +447,89 @@ int probe_access_flags(CPUArchState *env, target_ulong addr,
 struct tb_tc {
     const void *ptr;    /* pointer to the translated code */
     size_t size;
+#ifdef CONFIG_LATX_TU
+    size_t offset_in_tu;
+#endif
+};
+
+typedef struct TBProfile
+{
+    uint64_t nr_code;       /* ir2 number */
+    uint64_t jrra_in;       /* jrra in count, return count */
+    uint64_t jrra_miss;     /* jrra miss count */
+    uint64_t exec_times;    /* tb executes times */
+    uint64_t exit_times;    /* tb context switch times */
+    /* eflags related */
+    uint64_t sta_eliminate; /* static eliminate, need plus exec_times */
+    uint64_t sta_generate;  /* static generate, include eliminate */
+    uint64_t sta_simulate;  /* static simulate */
+    uint64_t dyn_eliminate; /* dynamic eliminate */
+    uint64_t dyn_generate;  /* dynamic generate */
+} TBProfile;
+
+#define CLN_TB_PROFILE(tb)              (memset(&(tb->profile), 0, sizeof(TBProfile)))
+#define GET_TB_PROFILE(tb, area)        (((tb->profile).area)           )
+#define SET_TB_PROFILE(tb, area, value) (((tb->profile).area)  = (value))
+#define ADD_TB_PROFILE(tb, area, value) (((tb->profile).area) += (value))
+
+
+#ifdef CONFIG_LATX
+typedef struct FastTB {
+    target_ulong pc;
+    const void *ptr;    /* pointer to the translated code */
+} FastTB;
+#endif
+#if defined(CONFIG_LATX_TU) || defined(CONFIG_LATX_AOT)
+#define TU_TB_INDEX_NEXT 0
+#define TU_TB_INDEX_TARGET 1
+typedef enum tu_tb_mode_type {
+    TU_TB_MODE_NONE = 0,
+    TU_TB_MODE_SWITCH_TO_TB,
+    TU_TB_MODE_BROKEN,
+    TU_TB_MODE_STATIC,
+    TB_GEN_CODE,
+    BAD_TB
+} tu_tb_mode_type;
+#endif
+
+struct separated_data{
+    uint8_t eflag_out;
+    uint8_t  _top_in;
+    uint8_t  _top_out;
+    TranslationBlock *next_tb[2];
+    void     *ir1;
+    int32_t rel_start;
+    int32_t rel_end;
+    tu_tb_mode_type tu_tb_mode;
+    uint8_t last_ir1_type;
+    union {
+        int is_first_tb;
+        int tu_size;
+    };
+#ifdef CONFIG_LATX_TU
+    target_ulong tu_id;
+#endif
+#ifdef CONFIG_LATX_HBR
+    union {
+        uint32_t xmm_in;
+        uint32_t gpr_in;
+    };
+    union {
+        uint32_t xmm_out;
+        uint32_t gpr_out;
+    };
+    union {
+        uint32_t xmm_use;
+        /* Need the previous TB to provide the correct GPR. */
+        uint32_t gpr_use;
+    };
+    union {
+        uint32_t xmm_def;
+        /* Can provide the correct GPR for the next TB. */
+        uint32_t gpr_def;
+    };
+    uint8_t shbr_type;
+#endif
 };
 
 struct TranslationBlock {
@@ -471,11 +559,20 @@ struct TranslationBlock {
 
     struct tb_tc tc;
 
-    /* first and second physical page containing code. The lower bit
-       of the pointer tells the index in page_next[].
-       The list is protected by the TB's page('s) lock(s) */
+    /*
+     * Track tb_page_addr_t intervals that intersect this TB.
+     * For user-only, the virtual addresses are always contiguous,
+     * and we use a unified interval tree.  For system, we use a
+     * linked list headed in each PageDesc.  Within the list, the lsb
+     * of the previous pointer tells the index of page_next[], and the
+     * list is protected by the PageDesc lock(s).
+     */
+#ifdef CONFIG_USER_ONLY
+    IntervalTreeNode itree;
+#else
     uintptr_t page_next[2];
     tb_page_addr_t page_addr[2];
+#endif
 
     /* jmp_lock placed here to fill a 4-byte hole. Its documentation is below */
     QemuSpin jmp_lock;
@@ -488,8 +585,10 @@ struct TranslationBlock {
      * two of such jumps are supported.
      */
     uint16_t jmp_reset_offset[2]; /* offset of original jump target */
+    uint16_t jmp_stub_reset_offset[2];
 #define TB_JMP_RESET_OFFSET_INVALID 0xffff /* indicates no jump generated */
     uintptr_t jmp_target_arg[2];  /* target address or offset */
+    uintptr_t jmp_stub_target_arg[2];
 
     /*
      * Each TB has a NULL-terminated list (jmp_list_head) of incoming jumps.
@@ -511,12 +610,135 @@ struct TranslationBlock {
     uintptr_t jmp_list_head;
     uintptr_t jmp_list_next[2];
     uintptr_t jmp_dest[2];
+#ifdef CONFIG_LATX
+    struct separated_data *s_data;
+#define TARGET1_ELIMINATE 0x01
+#define OPT_BCC 0x02
+#define IS_ENABLE_JRRA 0x04
+#define IS_AOT_TB 0x08
+#define IS_TUNNEL_LIB 0x10
+    uint8_t bool_flags;
+    uint8_t  eflag_use;
+    uintptr_t jmp_indirect;
+#ifdef CONFIG_LATX_INSTS_PATTERN
+    /*
+     * [0] : not taken
+     * [1] : taken
+     * [2] : the backup of the eflags instruction, which is used
+     *       to recover the eflags instruction when tb unlink.
+     */
+    #define EFLAG_BACKUP 2
+    uint16_t eflags_target_arg[EFLAG_BACKUP + 1];
+    /* bool target1_eliminate; */
+#endif
+    uint8_t signal_unlink[2];
+    uint16_t first_jmp_align;
+#ifdef CONFIG_LATX_PROFILER
+    TBProfile profile __attribute__((aligned(8)));
+#endif
+    /* remember to free these memory when QEMU recycle one TB */
+    unsigned long *return_target_ptr;
+    unsigned long next_86_pc;
+#if defined(CONFIG_LATX_TU) || defined(CONFIG_LATX_AOT)
+    union {
+        target_ulong target_pc;
+#define TU_UNLINK_STUB_INVALID 0xffffffff /* TU no unlink stub. */
+        uint32_t tu_unlink_stub_offset;
+    };
+    union {
+        target_ulong next_pc;
+        uint32_t tu_link_ins;
+    };
+#endif
+#ifdef CONFIG_LATX_TU
+    uint16_t tu_jmp[2];
+    uint8_t *tu_search_addr;
+#endif
+    unsigned long checksum;
+#endif
+    uint64_t tbm_reversed;
 };
+
+#define TB_MAGIC 0xbeefUL
+#define HOST_VIRT_ADDR_SPACE_BITS 48
+typedef struct MagicTBP {
+    unsigned short tb_pointer[3]; /* 48 bits are reserved for vadd */
+    unsigned short magic; /* 0xbeef */
+} MagicTBP;
+
+typedef struct TBMini {
+    union {
+        MagicTBP mtbp_struct;
+        uint64_t mtbp_uint64;
+    };
+} TBMini;
+
+#if defined(CONFIG_LATX_TU) || defined(CONFIG_LATX_AOT)
+typedef enum IR1_TYPE {
+    IR1_TYPE_NORMAL = 0,
+    IR1_TYPE_BRANCH,
+    IR1_TYPE_JUMP,
+    IR1_TYPE_CALL,
+    IR1_TYPE_RET,
+    IR1_TYPE_JUMPIN,
+    IR1_TYPE_CALLIN,
+    IR1_TYPE_SYSCALL,
+} IR1_TYPE;
+#endif
 
 /* Hide the qatomic_read to make code a little easier on the eyes */
 static inline uint32_t tb_cflags(const TranslationBlock *tb)
 {
     return qatomic_read(&tb->cflags);
+}
+
+static inline tb_page_addr_t tb_page_addr0(const TranslationBlock *tb)
+{
+#ifdef CONFIG_USER_ONLY
+    return tb->itree.start;
+#else
+    return tb->page_addr[0];
+#endif
+}
+
+static inline tb_page_addr_t tb_page_addr1(const TranslationBlock *tb)
+{
+#ifdef CONFIG_USER_ONLY
+    tb_page_addr_t next = tb->itree.last & TARGET_PAGE_MASK;
+    return next == (tb->itree.start & TARGET_PAGE_MASK) ? -1 : next;
+#else
+    return tb->page_addr[1];
+#endif
+}
+
+static inline void tb_set_page_addr0(TranslationBlock *tb,
+                                     tb_page_addr_t addr)
+{
+#ifdef CONFIG_USER_ONLY
+    tb->itree.start = addr;
+    /*
+     * To begin, we record an interval of one byte.  When the translation
+     * loop encounters a second page, the interval will be extended to
+     * include the first byte of the second page, which is sufficient to
+     * allow tb_page_addr1() above to work properly.  The final corrected
+     * interval will be set by tb_page_add() from tb->size before the
+     * node is added to the interval tree.
+     */
+    tb->itree.last = addr;
+#else
+    tb->page_addr[0] = addr;
+#endif
+}
+
+static inline void tb_set_page_addr1(TranslationBlock *tb,
+                                     tb_page_addr_t addr)
+{
+#ifdef CONFIG_USER_ONLY
+    /* Extend the interval to the first byte of the second page.  See above. */
+    tb->itree.last = addr;
+#else
+    tb->page_addr[1] = addr;
+#endif
 }
 
 /* current cflags for hashing/comparison */
@@ -529,15 +751,30 @@ static inline uint32_t curr_cflags(CPUState *cpu)
 #if defined(CONFIG_USER_ONLY)
 void tb_invalidate_phys_addr(target_ulong addr);
 void tb_invalidate_phys_range(target_ulong start, target_ulong end);
+bool tb_invalidate_phys_page_unwind(tb_page_addr_t addr, uintptr_t pc);
 #else
 void tb_invalidate_phys_addr(AddressSpace *as, hwaddr addr, MemTxAttrs attrs);
 #endif
 void tb_flush(CPUState *cpu);
+
+void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count);
 void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr);
 TranslationBlock *tb_htable_lookup(CPUState *cpu, target_ulong pc,
                                    target_ulong cs_base, uint32_t flags,
                                    uint32_t cflags);
+#ifdef CONFIG_LATX_AOT
+TranslationBlock *tb_smc_hash_table_lookup(target_ulong pc);
+void tb_smc_hash_table_insert(target_ulong pc, TranslationBlock *tb);
+#endif
+void tb_eflag_eliminate(TranslationBlock *tb, int n);
+void tb_eflag_recover(TranslationBlock *tb, int n);
+#ifdef CONFIG_LATX_XCOMISX_OPT
+void tb_stub_bypass(TranslationBlock *tb, int n, uintptr_t addr);
+#endif
 void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr);
+#ifdef CONFIG_LATX_TU
+void tu_relink(TranslationBlock *tb);
+#endif
 
 /* GETPC is the true target of the return instruction that we'll execute.  */
 #if defined(CONFIG_TCG_INTERPRETER)
@@ -580,62 +817,12 @@ struct MemoryRegionSection *iotlb_to_section(CPUState *cpu,
                                              hwaddr index, MemTxAttrs attrs);
 #endif
 
-#if defined(CONFIG_USER_ONLY)
-void mmap_lock(void);
-void mmap_unlock(void);
-bool have_mmap_lock(void);
+#ifdef CONFIG_LATX_AOT
+void mmap_trylock(void);
+#endif
 
 /**
- * get_page_addr_code() - user-mode version
- * @env: CPUArchState
- * @addr: guest virtual address of guest code
- *
- * Returns @addr.
- */
-static inline tb_page_addr_t get_page_addr_code(CPUArchState *env,
-                                                target_ulong addr)
-{
-    return addr;
-}
-
-/**
- * get_page_addr_code_hostp() - user-mode version
- * @env: CPUArchState
- * @addr: guest virtual address of guest code
- *
- * Returns @addr.
- *
- * If @hostp is non-NULL, sets *@hostp to the host address where @addr's content
- * is kept.
- */
-static inline tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env,
-                                                      target_ulong addr,
-                                                      void **hostp)
-{
-    if (hostp) {
-        *hostp = g2h_untagged(addr);
-    }
-    return addr;
-}
-#else
-static inline void mmap_lock(void) {}
-static inline void mmap_unlock(void) {}
-
-/**
- * get_page_addr_code() - full-system version
- * @env: CPUArchState
- * @addr: guest virtual address of guest code
- *
- * If we cannot translate and execute from the entire RAM page, or if
- * the region is not backed by RAM, returns -1. Otherwise, returns the
- * ram_addr_t corresponding to the guest code at @addr.
- *
- * Note: this function can trigger an exception.
- */
-tb_page_addr_t get_page_addr_code(CPUArchState *env, target_ulong addr);
-
-/**
- * get_page_addr_code_hostp() - full-system version
+ * get_page_addr_code_hostp()
  * @env: CPUArchState
  * @addr: guest virtual address of guest code
  *
@@ -650,6 +837,32 @@ tb_page_addr_t get_page_addr_code(CPUArchState *env, target_ulong addr);
  */
 tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, target_ulong addr,
                                         void **hostp);
+
+/**
+ * get_page_addr_code()
+ * @env: CPUArchState
+ * @addr: guest virtual address of guest code
+ *
+ * If we cannot translate and execute from the entire RAM page, or if
+ * the region is not backed by RAM, returns -1. Otherwise, returns the
+ * ram_addr_t corresponding to the guest code at @addr.
+ *
+ * Note: this function can trigger an exception.
+ */
+static inline tb_page_addr_t get_page_addr_code(CPUArchState *env,
+                                                target_ulong addr)
+{
+    return get_page_addr_code_hostp(env, addr, NULL);
+}
+
+#if defined(CONFIG_USER_ONLY)
+void mmap_lock(void);
+void mmap_unlock(void);
+bool have_mmap_lock(void);
+
+#else
+static inline void mmap_lock(void) {}
+static inline void mmap_unlock(void) {}
 
 void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length);
 void tlb_set_dirty(CPUState *cpu, target_ulong vaddr);
