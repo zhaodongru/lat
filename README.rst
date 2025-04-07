@@ -148,6 +148,9 @@ LATX 基于 QEMU 6 版本开发并进行了深度优化，性能相比原生 QEM
     ./build-release.sh
 
 
+.. code-block:: text
+# Arch Linux
+pacman -S --noconfirm ninja gcc pkgconf python3 python-setuptools openssl-static openssl
 
 未来规划（TODO）
 ===============
