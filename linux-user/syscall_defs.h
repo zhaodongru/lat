@@ -130,6 +130,9 @@
     ((nr)   << TARGET_IOC_NRSHIFT) | \
     ((size) << TARGET_IOC_SIZESHIFT))
 
+#define TARGET_IOC_NR(nr)		(((nr) >> TARGET_IOC_NRSHIFT) & TARGET_IOC_NRMASK)
+#define TARGET_IOC_SIZE(nr)		(((nr) >> TARGET_IOC_SIZESHIFT) & TARGET_IOC_SIZEMASK)
+
 /* used to create numbers */
 #define TARGET_IO(type,nr)		TARGET_IOC(TARGET_IOC_NONE,(type),(nr),0)
 #define TARGET_IOR(type,nr,size)	TARGET_IOC(TARGET_IOC_READ,(type),(nr),sizeof(size))
@@ -3833,4 +3836,20 @@ struct target_snd_xferi {
 #define TARGET_UI_SET_RELBIT	TARGET_IOW('U', 102, int)
 #define TARGET_UI_DEV_CREATE    TARGET_IO('U', 1)
 #define TARGET_UI_DEV_DESTROY   TARGET_IO('U', 2)
+
+/* ioctl interface */
+#define TARGET_HIDIOCGRDESCSIZE	TARGET_IOR('H', 0x01, int)
+#define TARGET_HIDIOCGRDESC		TARGET_IOR('H', 0x02, struct hidraw_report_descriptor)
+#define TARGET_HIDIOCGRAWINFO		TARGET_IOR('H', 0x03, struct hidraw_devinfo)
+#define TARGET_HIDIOCGRAWNAME(len)     TARGET_IOC(TARGET_IOC_READ, 'H', 0x04, len)
+#define TARGET_HIDIOCGRAWPHYS(len)     TARGET_IOC(TARGET_IOC_READ, 'H', 0x05, len)
+/* The first byte of SFEATURE and GFEATURE is the report number */
+#define TARGET_HIDIOCSFEATURE(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x06, len)
+#define TARGET_HIDIOCGFEATURE(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x07, len)
+#define TARGET_HIDIOCGRAWUNIQ(len)     TARGET_IOC(TARGET_IOC_READ, 'H', 0x08, len)
+#define TARGET_HIDIOCSINPUT(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x09, len)
+#define TARGET_HIDIOCGINPUT(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x0A, len)
+#define TARGET_HIDIOCSOUTPUT(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x0B, len)
+#define TARGET_HIDIOCGOUTPUT(len)    TARGET_IOC(TARGET_IOC_WRITE|TARGET_IOC_READ, 'H', 0x0C, len)
+#define TARGET_HIDIOCREVOKE    TARGET_IOW('H', 0x0D, int)
 #endif

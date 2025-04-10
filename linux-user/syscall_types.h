@@ -1929,4 +1929,20 @@ STRUCT(sg_io_hdr,
         TYPE_INT,
         TYPE_INT,
         TYPE_INT)
+STRUCT(termios2,
+         TYPE_INT,
+         TYPE_INT,
+         TYPE_INT,
+         TYPE_INT,
+         TYPE_CHAR,
+         MK_ARRAY(TYPE_CHAR, 19),
+         TYPE_INT,
+         TYPE_INT)
+STRUCT(hidraw_devinfo,
+         TYPE_INT,
+         TYPE_SHORT,
+         TYPE_SHORT)
+STRUCT(hidraw_report_descriptor,
+         TYPE_INT,
+         MK_ARRAY(TYPE_CHAR, 4096))
 #include "ioctl/ioctl_type/type_amdgpu_drm.h"

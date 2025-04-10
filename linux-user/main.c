@@ -49,6 +49,7 @@
 #include "target_elf.h"
 #include "cpu_loop-common.h"
 #include "crypto/init.h"
+int mydebug = 1;
 
 #ifdef CONFIG_LATX
 #include "latx-config.h"

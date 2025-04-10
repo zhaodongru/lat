@@ -5433,7 +5433,7 @@ STRUCT_MAX
 #undef STRUCT
 #undef STRUCT_SPECIAL
 
-#define MAX_STRUCT_SIZE 4096
+#define MAX_STRUCT_SIZE 16384
 
 #ifdef CONFIG_FIEMAP
 /* So fiemap access checks don't overflow on 32 bit systems.
@@ -8102,8 +8102,25 @@ static abi_long do_ioctl_mpt3(const IOCTLEntry *ie,
     }
     return -TARGET_ENOSYS;
 }
+static abi_long handle_hidfeature(int fd, abi_ulong cmd, abi_ulong arg,
+                                  int len, bool is_read)
+{
+    void *host_buf;
+
+    host_buf = lock_user(is_read ? VERIFY_WRITE : VERIFY_READ, arg, len, 1);
+    if (!host_buf) {
+        return -TARGET_EFAULT;
+    }
+
+    int ret = get_errno(safe_ioctl(fd, cmd, host_buf));
+
+    unlock_user(host_buf, arg, len);
+
+    return ret;
+}
 
 #include "ioctl/ioctl_syscall/syscall_amdgpu_drm.c"
+#include <linux/hidraw.h>
 
 typedef __u32 u32;
 typedef __u64 u64;
@@ -8148,6 +8165,19 @@ static abi_long do_ioctl(int fd, int cmd, abi_ulong arg)
 #endif
     /* slow path to iterate the ioctl_entries */
     if (ie->target_cmd != cmd) {
+        switch(TARGET_IOC_NR(cmd)) {
+            case TARGET_IOC_NR(TARGET_HIDIOCSFEATURE(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGFEATURE(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGRAWNAME(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGRAWPHYS(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGRAWUNIQ(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCSINPUT(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGINPUT(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCSOUTPUT(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCGOUTPUT(0)):
+            case TARGET_IOC_NR(TARGET_HIDIOCREVOKE):
+                return handle_hidfeature(fd, cmd, arg, TARGET_IOC_SIZE(cmd), 1);
+        } 
         ie = ioctl_entries;
         for (i = 0; ; i++) {
             if (ie->target_cmd == 0) {
@@ -8195,6 +8225,11 @@ static abi_long do_ioctl(int fd, int cmd, abi_ulong arg)
         target_size = thunk_type_size(arg_type, 0);
         switch(ie->access) {
         case IOC_R:
+            if (ie->host_cmd == HIDIOCGRDESC) {
+                /* kernel use the size, should pass it */
+                argptr = lock_user(VERIFY_WRITE, arg, 4, 0);
+                *(uint32_t*)buf_temp = *(uint32_t *)argptr;
+            }
             ret = get_errno(safe_ioctl(fd, ie->host_cmd, buf_temp));
             if (!is_error(ret)) {
                 argptr = lock_user(VERIFY_WRITE, arg, target_size, 0);
