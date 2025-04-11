@@ -4309,6 +4309,7 @@ static bool no_right(int64_t addr, int bit_count,
     return false;
 }
 
+#ifndef CONFIG_LOONGARCH_NEW_WORLD
 static void set_interpret_glue_code(ucontext_t *uc, unsigned int inst, int rj)
 {
     int cpu_index = current_cpu->cpu_index;
@@ -4329,6 +4330,7 @@ static void set_interpret_glue_code(ucontext_t *uc, unsigned int inst, int rj)
     glue[2] = 0x48000300;
     UC_PC(uc) = (unsigned long)glue;
 }
+#endif
 
 int shared_private_interpret(siginfo_t *info, ucontext_t *uc)
 {
