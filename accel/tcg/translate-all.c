@@ -3787,7 +3787,7 @@ void page_protect(tb_page_addr_t address)
     assert_memory_lock();
 
     start = address & qemu_host_page_mask;
-    last = start + qemu_host_page_size - 1;
+    last = start + qemu_host_page_size;
 
     p = pageflags_find(address, address);
     if (p && (p->flags & PAGE_WRITE)) {
@@ -3802,7 +3802,7 @@ void page_protect(tb_page_addr_t address)
             }
         }
 
-        pageflags_set_clear(start, last, 0, PAGE_WRITE);
+        pageflags_set_clear(start, last + 1, 0, PAGE_WRITE);
         mprotect(g2h_untagged(start), qemu_host_page_size,
                 (prot & PAGE_BITS) & ~PAGE_WRITE);
     }
